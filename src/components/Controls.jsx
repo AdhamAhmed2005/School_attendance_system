@@ -29,7 +29,10 @@ import { ScrollArea } from "./ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { useClass } from "@/contexts/ClassContext";
 import { useStudent } from "@/contexts/StudentContext";
+import { useAttendance } from "@/contexts/AttendanceContext";
+import axios from "axios";
 import { Calendar } from "./ui/calendar";
+import { toast } from "sonner";
 
 function Controls() {
   const {
@@ -43,6 +46,7 @@ function Controls() {
     setSelectedDate,
   } = useClass();
   const { importStudents, fetchStudents } = useStudent();
+  const { addAttendance, fetchClassAttendanceByDate } = useAttendance();
   const [students, setStudents] = useState([]);
 
   useEffect(() => {
@@ -154,46 +158,116 @@ function Controls() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const lines = ev.target.result
-        .split("\n")
+      // split on CRLF or LF, trim, skip empty lines
+      const raw = ev.target.result || "";
+      const lines = raw
+        .split(/\r?\n/)
         .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          // If CSV, take first column
+          const first = line.split(",")[0];
+          return first ? first.trim() : "";
+        })
         .filter(Boolean);
+      if (lines.length === 0) {
+        toast.error("الملف لا يحتوي على أسماء صالحة");
+        return;
+      }
       setBulkNames(lines);
+      toast.success(`تم استيراد ${lines.length} اسم${lines.length > 1 ? "ات" : ""}`);
     };
     reader.readAsText(file, "utf-8");
   };
 
   const saveBulkNames = async () => {
     try {
-      if (!bulkNames || bulkNames.length === 0) {
-        console.warn("No students to save");
+      if (!selectedClass) {
+        toast.error("اختر فصلًا أولاً");
         return;
       }
 
-      const studentsData = bulkNames
-        .filter((name) => name && name.trim() !== "")
-        .map((name, index) => ({
-          name: name.trim(),
-          classId: selectedClass.id,
-          rollNumber: `A${String(index + 1).padStart(2, "0")}`,
-        }));
+      if (!bulkNames || bulkNames.length === 0) {
+        toast.error("لا توجد أسماء لحفظها");
+        return;
+      }
 
-      // 🧠 Prevent re-importing existing students (frontend check)
-      const existing = await fetchStudents(selectedClass.id);
-      const existingNames = new Set(existing.map((s) => s.name.trim()));
+      // Fetch existing students for this class to compute roll offset and prevent duplicates
+      const existingRaw = await fetchStudents(selectedClass.id);
+      const existing = Array.isArray(existingRaw) ? existingRaw : existingRaw ? [existingRaw] : [];
+      const existingNames = new Set(existing.map((s) => (s.name || "").trim().toLowerCase()));
 
-      const newStudents = studentsData.filter((s) => !existingNames.has(s.name.trim()));
+      const cleaned = bulkNames
+        .map((n) => (n || "").trim())
+        .filter((n) => n !== "");
+
+      if (cleaned.length === 0) {
+        toast.error("لا توجد أسماء صالحة لحفظها");
+        return;
+      }
+
+      const rollStart = existing.length; // continue numbering after existing students
+
+      const studentsData = cleaned.map((name, index) => ({
+        name: name,
+        classId: selectedClass.id,
+        rollNumber: `A${String(rollStart + index + 1).padStart(2, "0")}`,
+      }));
+
+      const newStudents = studentsData.filter((s) => !existingNames.has((s.name || "").trim().toLowerCase()));
+      const skipped = studentsData.length - newStudents.length;
 
       if (newStudents.length === 0) {
-        console.log("✅ All students already exist — skipping import");
+        toast(`لم تتم إضافة أي طالبات — ${skipped} مكرر${skipped > 1 ? "ات" : ""}`);
         return;
       }
 
       await importStudents(newStudents);
       await fetchStudents(selectedClass.id);
+      // After importing students, create attendance records for the selected date for this class.
+      try {
+        // fetch fresh students with ids
+        const fresh = await fetchStudents(selectedClass.id);
+        const studentArray = Array.isArray(fresh) ? fresh : fresh ? [fresh] : [];
+        if (studentArray.length > 0) {
+          const isoDate = selectedDate.toISOString();
+          const errors = [];
+          // Create attendance records one-by-one to avoid batch POST failure on the server
+          for (const s of studentArray) {
+            // Initialize record as absent so each student has a concrete attendance id
+            const rec = {
+              id: s.id, // set id equal to student id per request
+              studentId: s.id,
+              classId: selectedClass.id,
+              date: isoDate,
+              isAbsent: true,
+            };
+            try {
+              // POST directly to the absolute API endpoint (bypass local baseURL) as requested
+              // This will attempt to create the attendance record with the specified id
+              await axios.post("https://school-discipline.runasp.net/api/Attendance", rec, { headers: { 'Content-Type': 'application/json' } });
+              // No per-record refresh here; we'll refresh once after the loop
+            } catch (e) {
+              console.error("Failed to create attendance for", s.id, e);
+              errors.push({ studentId: s.id, error: e?.message || String(e) });
+            }
+            // small delay to avoid overwhelming server
+            await new Promise((res) => setTimeout(res, 150));
+          }
+          // refresh server attendance for this class/date so ids are present in client state
+          await fetchClassAttendanceByDate(selectedClass.id, selectedDate.toISOString().slice(0,10));
+          if (errors.length === 0) toast.success(`تم إنشاء سجلات حضور ${studentArray.length} طالباً`);
+          else toast.error(`تم إنشاء سجلات معظم الطلاب، لكن فشل ${errors.length} سجل — تحقق من التصحيح`);
+        }
+      } catch (err) {
+        console.error('Error creating attendance after import', err);
+        toast.error('فشل إنشاء سجلات الحضور تلقائياً — تحقق من التصحيح');
+      }
       setShowBulkInput(false);
+      toast.success(`تم إضافة ${newStudents.length} طالب${newStudents.length > 1 ? "ات" : ""}${skipped > 0 ? `، ${skipped} مكرر تم تجاهله` : ""}`);
     } catch (error) {
       console.error("Error saving students:", error);
+      toast.error("حدث خطأ أثناء حفظ الأسماء");
     }
   };
 
@@ -298,8 +372,9 @@ function Controls() {
                 <SelectValue placeholder="اختر الفصل" className="text-right justify-end" />
               </SelectTrigger>
               <SelectContent>
-                {classes.map((cls) => (
-                  <div key={cls?.id || Date.now()} className="flex flex-row-reverse items-center justify-between px-2">
+                {Array.isArray(classes) ? (
+                  classes.map((cls, idx) => (
+                    <div key={cls?.id ?? `cls-${idx}`} className="flex flex-row-reverse items-center justify-between px-2">
                     <SelectItem value={cls.id?.toString()} className="flex-1 text-right justify-end">
                       {cls.className} ({cls.studentCount} طالبة)
                       {cls.director && ` - ${cls.director}`}
@@ -332,7 +407,12 @@ function Controls() {
                       </AlertDialogContent>
                     </AlertDialog>
                   </div>
-                ))}
+                  ))
+                ) : (
+                  <div className="px-3 py-2 text-sm text-right text-gray-500">
+                    {console.warn("Controls: expected 'classes' to be an array, got:", classes) || "لا توجد فصول متاحة"}
+                  </div>
+                )}
               </SelectContent>
             </Select>
             <Button
@@ -467,7 +547,7 @@ function Controls() {
             </CardHeader>
             <CardContent className="px-6">
               <div className="mb-4 flex gap-2">
-                <input type="file" accept=".txt" onChange={importFromFile} className="hidden" id="import-file" />
+                <input type="file" accept=".txt,.csv" onChange={importFromFile} className="hidden" id="import-file" />
                 <Button variant="outline" onClick={() => document.getElementById("import-file").click()}>
                   📁 استيراد من ملف
                 </Button>

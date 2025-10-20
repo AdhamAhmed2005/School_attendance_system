@@ -138,6 +138,27 @@ body {
   width: 12px;
 }
 
+/* Improve button spacing and responsiveness */
+@layer utilities {
+  .btn-group > *:not(:last-child) {
+    margin-inline-start: 0.5rem;
+  }
+
+  /* On very small screens make non-icon buttons full width to avoid cramping */
+  @media (max-width: 640px) {
+    .btn-responsive-full {
+      width: 100%;
+      display: block;
+    }
+
+    .btn-group {
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 0.5rem;
+    }
+  }
+}
+
 ::-webkit-scrollbar-track {
   background-color: #f1f1f1;
 }

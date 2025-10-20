@@ -38,7 +38,24 @@ export const ReportsProvider = ({ children }) => {
   const addReport = useCallback(async (reportData) => {
     try {
       setLoading(true);
-      const response = await axios.post("/Reports", reportData);
+      let response;
+      try {
+        response = await axios.post("/Reports", reportData);
+      } catch (err) {
+        console.warn('POST /Reports failed, attempting absolute URL fallback', err);
+        // Build an absolute URL from axios.defaults.baseURL (which might be '/api')
+        const base = axios.defaults.baseURL || "";
+        let absoluteUrl;
+        if (/^https?:\/\//i.test(base)) {
+          absoluteUrl = base.replace(/\/$/, "") + "/Reports";
+        } else {
+          // base is relative (like '/api') — join with window.location.origin
+          const origin = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin.replace(/\/$/, '') : '';
+          const rel = base.startsWith('/') ? base : (`/${base}`);
+          absoluteUrl = origin + rel.replace(/\/$/, '') + "/Reports";
+        }
+        response = await axios.post(absoluteUrl, reportData);
+      }
       setReports((prev) => [...prev, response.data]);
       return response.data;
     } catch (err) {

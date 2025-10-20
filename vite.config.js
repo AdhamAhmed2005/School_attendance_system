@@ -12,5 +12,15 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    proxy: {
+      // Proxy API requests to the backend to avoid CORS during local development
+      '/api': {
+        target: 'https://school-discipline.runasp.net',
+        changeOrigin: true,
+        secure: true,
+        // If the backend expects paths without /api prefix, uncomment rewrite
+        // rewrite: (path) => path.replace(/^\/api/, '/api')
+      },
+    },
   },
 });

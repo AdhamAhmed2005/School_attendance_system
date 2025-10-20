@@ -14,7 +14,17 @@ export const ClassProvider = ({ children }) => {
     try {
       setLoading(true);
       const response = await axios.get("/Class");
-      setClasses(response.data);
+      // Normalize response to an array to avoid runtime errors if API returns a single object
+      const data = response?.data;
+      if (Array.isArray(data)) {
+        setClasses(data);
+      } else if (data && typeof data === "object") {
+        console.warn("ClassContext.fetchClasses: expected array, got object — wrapping in array", data);
+        setClasses([data]);
+      } else {
+        console.warn("ClassContext.fetchClasses: unexpected response data for /Class:", data);
+        setClasses([]);
+      }
       setError(null);
     } catch (err) {
       console.error("Error fetching classes:", err);

@@ -13,7 +13,17 @@ export const StudentProvider = ({ children }) => {
       setLoading(true);
       const url = classId ? `/Student?classId=${classId}` : "/Student";
       const response = await axios.get(url);
-      setStudents(response.data);
+      // Normalize response to an array to avoid runtime errors if API returns single object
+      const data = response?.data;
+      if (Array.isArray(data)) {
+        setStudents(data);
+      } else if (data && typeof data === "object") {
+        console.warn("StudentContext.fetchStudents: expected array, got object — wrapping in array", data);
+        setStudents([data]);
+      } else {
+        console.warn("StudentContext.fetchStudents: unexpected response data for /Student:", data);
+        setStudents([]);
+      }
       setError(null);
       return response.data;
     } catch (err) {
@@ -42,9 +52,13 @@ export const StudentProvider = ({ children }) => {
     try {
       setLoading(true);
       const response = await axios.post("/Student", studentData);
-      console.log("res: ", response);
-
-      setStudents((prev) => [...prev, ...(Array.isArray(response.data) ? response.data : [response.data])]);
+      // Normalize response and append
+      const data = response?.data;
+      if (Array.isArray(data)) {
+        setStudents((prev) => [...prev, ...data]);
+      } else if (data) {
+        setStudents((prev) => [...prev, data]);
+      }
       return response.data;
     } catch (err) {
       console.error("Error adding student:", err);
