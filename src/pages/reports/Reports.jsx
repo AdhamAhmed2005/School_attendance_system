@@ -24,6 +24,8 @@ function Reports() {
   const [pageSize, setPageSize] = useState(10);
   const [selectedReport, setSelectedReport] = useState(null);
   const [open, setOpen] = useState(false);
+  const [showRaw, setShowRaw] = useState(false);
+  
 
   useEffect(() => {
     fetchReports();
@@ -71,6 +73,7 @@ function Reports() {
     try {
       const data = await fetchReportById(id);
       setSelectedReport(data);
+      setShowRaw(false);
       setOpen(true);
     } catch (err) {
       console.error(err);
@@ -112,7 +115,9 @@ function Reports() {
         toast.error('لا يوجد بيانات لتصدير');
         return;
       }
-      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      // Prepend UTF-8 BOM so Excel opens the file with correct encoding for Arabic
+      const bom = "\uFEFF";
+      const blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -129,7 +134,6 @@ function Reports() {
   // Add report modal state
   const [addOpen, setAddOpen] = useState(false);
   const [newType, setNewType] = useState("");
-  const [newClassId, setNewClassId] = useState("");
   const [newContent, setNewContent] = useState("");
   const [adding, setAdding] = useState(false);
   const [useCustomType, setUseCustomType] = useState(false);
@@ -142,8 +146,7 @@ function Reports() {
       return;
     }
     // server expects { id, reportType, generatedAt, reportData }
-    // embed optional classId into reportData string as JSON if provided
-    const reportDataPayload = newClassId ? JSON.stringify({ classId: Number(newClassId), text: newContent }) : newContent;
+  const reportDataPayload = newContent;
     const payload = {
       id: 0,
       reportType: newType,
@@ -156,8 +159,7 @@ function Reports() {
       toast.success("تم إنشاء التقرير");
       fetchReports();
       setAddOpen(false);
-      setNewType("");
-      setNewClassId("");
+  setNewType("");
       setNewContent("");
     } catch (err) {
       console.error(err);
@@ -209,7 +211,7 @@ function Reports() {
             <div className="flex flex-col items-end">
               <Label className="text-right m-2">الفصل</Label>
               <Select value={filterClass ?? "__all"} onValueChange={(v) => { setFilterClass(v === "__all" ? null : v); setPage(1); }}>
-                <SelectTrigger className="min-w-[10rem] w-full"><SelectValue placeholder="الكل" /></SelectTrigger>
+                <SelectTrigger className="md:min-w-[10rem] w-full"><SelectValue placeholder="الكل" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__all">الكل</SelectItem>
                   {Array.isArray(classes) && classes.map((c) => (
@@ -221,7 +223,7 @@ function Reports() {
             <div className="flex flex-col items-end">
               <Label className="text-right m-2">نوع التقرير</Label>
               <Select value={reportTypeFilter ?? "__all"} onValueChange={(v) => { setReportTypeFilter(v === "__all" ? null : v); setPage(1); }}>
-                <SelectTrigger className="min-w-[10rem] w-full"><SelectValue placeholder="الكل" /></SelectTrigger>
+                <SelectTrigger className="md:min-w-[10rem] w-full"><SelectValue placeholder="الكل" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__all">الكل</SelectItem>
                   {presetTypes.filter(t => typeof t === 'string' && t.trim() && !/^[0-9]+$/.test(t) && t.length > 1).map((t) => (
@@ -253,7 +255,7 @@ function Reports() {
               <div className="flex flex-col items-end">
                 <Label className="text-right hidden md:block m-2">ترتيب</Label>
                 <Select value={sortOrder} onValueChange={(v) => setSortOrder(v)}>
-                  <SelectTrigger className="min-w-[9rem] w-40"><SelectValue placeholder="ترتيب" /></SelectTrigger>
+                  <SelectTrigger className="md:min-w-[9rem] w-full md:w-40"><SelectValue placeholder="ترتيب" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="desc">الأحدث أولاً</SelectItem>
                     <SelectItem value="asc">الأقدم أولاً</SelectItem>
@@ -263,7 +265,7 @@ function Reports() {
               <div className="flex flex-col items-end">
                 <Label className="text-right hidden md:block m-2">حجم الصفحة</Label>
                 <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setPage(1); }}>
-                  <SelectTrigger className="min-w-[6rem] w-28"><SelectValue placeholder="حجم الصفحة" /></SelectTrigger>
+                  <SelectTrigger className="md:min-w-[6rem] w-full md:w-28"><SelectValue placeholder="حجم الصفحة" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="5">5</SelectItem>
                     <SelectItem value="10">10</SelectItem>
@@ -273,7 +275,7 @@ function Reports() {
               </div>
               <div className="flex flex-col items-end">
                   <Label className="text-right hidden md:block m-2">تصدير</Label>
-                  <div className="flex gap-2 items-center">
+                  <div className="flex flex-col sm:flex-row gap-2 items-stretch w-full">
                     <Button className="whitespace-nowrap btn-responsive-full" onClick={handleExport} disabled={loading} variant="primary" size="lg">تصدير JSON</Button>
                     <Button className="whitespace-nowrap btn-responsive-full" onClick={handleExportCSV} disabled={loading} variant="primary" size="lg">تصدير CSV</Button>
                     {/* Add Report trigger */}
@@ -281,7 +283,7 @@ function Reports() {
                       <DialogTrigger asChild>
                         <Button className="whitespace-nowrap btn-responsive-full" variant="primary" size="lg">إضافة تقرير</Button>
                       </DialogTrigger>
-                      <DialogContent>
+                      <DialogContent className="sm:max-w-[720px] w-full">
                         <DialogHeader>
                           <DialogTitle>إضافة تقرير جديد</DialogTitle>
                         </DialogHeader>
@@ -301,7 +303,7 @@ function Reports() {
                                     setNewType(v);
                                   }
                                 }}>
-                                  <SelectTrigger className="min-w-[10rem] w-full"><SelectValue placeholder="اختر نوعًا" /></SelectTrigger>
+                                  <SelectTrigger className="md:min-w-[10rem] w-full"><SelectValue placeholder="اختر نوعًا" /></SelectTrigger>
                                   <SelectContent>
                                     <SelectItem value="__none">اختر من القائمة</SelectItem>
                                     {presetTypes.map((t) => (
@@ -316,18 +318,7 @@ function Reports() {
                               )}
                               {!typeValid && <div className="text-xs text-red-500 mt-1">الرجاء تحديد أو كتابة نوع التقرير</div>}
                             </div>
-                          <div className="flex flex-col items-end">
-                            <Label className="text-right m-2">الفصل (اختياري)</Label>
-                            <Select value={newClassId ?? "__none"} onValueChange={(v) => { setNewClassId(v === "__none" ? "" : v); }}>
-                              <SelectTrigger className="min-w-[10rem] w-full"><SelectValue placeholder="اختر الفصل (اختياري)" /></SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="__none">لا شيء</SelectItem>
-                                {Array.isArray(classes) && classes.map((c) => (
-                                  <SelectItem key={c.id} value={String(c.id)}>{c.className}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
+                          {/* optional class removed */}
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="flex flex-col items-end">
                               <Label className="text-right m-2">المحتوى</Label>
@@ -339,15 +330,9 @@ function Reports() {
                             </div>
                             <div className="flex flex-col items-end">
                               <Label className="text-right m-2">معاينة التقرير</Label>
-                              <div className="w-full border rounded p-3 bg-gray-50 min-h-[120px]">
+                              <div className="w-full border rounded p-3 bg-gray-50 min-h-[120px] overflow-auto">
                                 <div className="font-semibold mb-1">{newType || 'نوع غير محدد'}</div>
-                                <div className="text-sm text-gray-700 whitespace-pre-wrap">
-                                  {newClassId ? (
-                                    <pre className="whitespace-pre-wrap">{JSON.stringify({ classId: Number(newClassId), text: newContent }, null, 2)}</pre>
-                                  ) : (
-                                    <div>{newContent || 'لا يوجد محتوى بعد'}</div>
-                                  )}
-                                </div>
+                                <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">{newContent || 'لا يوجد محتوى بعد'}</div>
                               </div>
                             </div>
                           </div>
@@ -378,12 +363,11 @@ function Reports() {
                         <div className="text-sm text-gray-500 mt-1">{r.classId ? (classes.find(c => c.id === r.classId)?.className || `الفصل ${r.classId}`) : ''}</div>
                       </div>
                       <div className="flex flex-col items-end gap-2">
-                        <div className="text-xs text-gray-400">ID: {r.id}</div>
-                        <div className="flex gap-2">
-                          <Button size="sm" variant="ghost" onClick={() => handleView(r.id)}>عرض</Button>
-                          <Button size="sm" variant="outline" onClick={() => handleDownloadReport(r)}>تحميل</Button>
+                          <div className="text-xs text-gray-400">ID: {r.id}</div>
+                          <div className="flex gap-2">
+                            <Button size="sm" variant="outline" onClick={() => handleDownloadReport(r)}>تحميل</Button>
+                          </div>
                         </div>
-                      </div>
                     </div>
                     <div className="mt-3 text-sm text-gray-700 max-h-28 overflow-auto">
                       <pre className="whitespace-pre-wrap">{(() => {
@@ -416,13 +400,94 @@ function Reports() {
           )}
 
           <Dialog open={open} onOpenChange={setOpen}>
-            <DialogContent>
+            <DialogContent className="sm:max-w-[900px] w-full">
               <DialogHeader>
                 <DialogTitle>تفاصيل التقرير</DialogTitle>
               </DialogHeader>
-              <pre className="whitespace-pre-wrap max-h-[60vh] overflow-auto">{JSON.stringify(selectedReport, null, 2)}</pre>
+
+              {!selectedReport ? (
+                <div className="text-center py-8 text-gray-500">لا يوجد تقرير للعرض.</div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-lg font-semibold">{selectedReport.reportType || `تقرير ${selectedReport.id}`}</div>
+                      <div className="text-sm text-gray-600">{selectedReport.generatedAt ? new Date(selectedReport.generatedAt).toLocaleString() : ''}</div>
+                      <div className="text-sm text-gray-500 mt-1">{selectedReport.classId ? (classes.find(c => c.id === selectedReport.classId)?.className || `الفصل ${selectedReport.classId}`) : ''}</div>
+                    </div>
+                    <div className="text-right text-xs text-gray-400">ID: {selectedReport.id}</div>
+                  </div>
+
+                  <div className="border rounded p-3 bg-white">
+                    {/* render reportData in a friendly way */}
+                    {(() => {
+                      const rd = selectedReport.reportData;
+                      // if string, try parse
+                      let parsed = rd;
+                      if (typeof rd === 'string') {
+                        try {
+                          parsed = JSON.parse(rd);
+                        } catch (e) {
+                          parsed = rd;
+                        }
+                      }
+
+                      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object') {
+                        // render simple table
+                        const keys = Array.from(new Set(parsed.flatMap(o => Object.keys(o))));
+                        return (
+                          <div className="overflow-auto">
+                            <table className="w-full text-sm table-auto border-collapse">
+                              <thead>
+                                <tr>
+                                  {keys.map(k => <th key={k} className="text-left font-medium border-b p-2">{k}</th>)}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {parsed.map((row, idx) => (
+                                  <tr key={idx} className="even:bg-gray-50">
+                                    {keys.map(k => <td key={k} className="p-2 align-top">{String(row[k] ?? '')}</td>)}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        );
+                      }
+
+                      if (parsed && typeof parsed === 'object') {
+                        // key/value list
+                        return (
+                          <div className="grid grid-cols-1 gap-2">
+                            {Object.keys(parsed).map((k) => (
+                              <div key={k} className="flex gap-2">
+                                <div className="font-medium text-sm text-gray-700 w-40">{k}</div>
+                                <div className="text-sm text-gray-700 break-words">{typeof parsed[k] === 'object' ? JSON.stringify(parsed[k]) : String(parsed[k])}</div>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      }
+
+                      // fallback: show as text
+                      return <div className="whitespace-pre-wrap text-sm text-gray-800">{String(parsed ?? '')}</div>;
+                    })()}
+                  </div>
+
+                  <div className="flex justify-end gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setShowRaw(s => !s)}>{showRaw ? 'إخفاء JSON' : 'عرض JSON'}</Button>
+                    <Button size="sm" variant="ghost" onClick={() => handleDownloadReport(selectedReport)}>تحميل JSON</Button>
+                    <Button size="sm" variant="primary" onClick={() => setOpen(false)}>إغلاق</Button>
+                  </div>
+
+                  {showRaw && (
+                    <pre className="whitespace-pre-wrap max-h-[50vh] overflow-auto border rounded p-2 bg-gray-50">{JSON.stringify(selectedReport, null, 2)}</pre>
+                  )}
+                </div>
+              )}
             </DialogContent>
           </Dialog>
+          
         </CardContent>
       </Card>
     </TabsContent>

@@ -14,21 +14,19 @@ export const ClassProvider = ({ children }) => {
     try {
       setLoading(true);
       const response = await axios.get("/Class");
-      // Normalize response to an array to avoid runtime errors if API returns a single object
+      // Normalize response to an array (some APIs return a single object)
       const data = response?.data;
-      if (Array.isArray(data)) {
-        setClasses(data);
-      } else if (data && typeof data === "object") {
-        console.warn("ClassContext.fetchClasses: expected array, got object — wrapping in array", data);
-        setClasses([data]);
-      } else {
-        console.warn("ClassContext.fetchClasses: unexpected response data for /Class:", data);
-        setClasses([]);
+      const normalized = Array.isArray(data) ? data : (data && typeof data === 'object' ? [data] : []);
+      if (!Array.isArray(data) && data && typeof data === 'object') {
+        console.warn('ClassContext.fetchClasses: expected array, got object — wrapping in array', data);
       }
+      setClasses(normalized);
       setError(null);
+      return normalized;
     } catch (err) {
       console.error("Error fetching classes:", err);
       setError(err.message || "Failed to fetch classes");
+      return [];
     } finally {
       setLoading(false);
     }
@@ -52,8 +50,15 @@ export const ClassProvider = ({ children }) => {
       try {
         setLoading(true);
         const response = await axios.post("/Class", classData);
-        if (!response.data || !response.data.id) await fetchClasses();
-        else setClasses((prev) => [...prev, response.data]);
+        if (!response.data || !response.data.id) {
+          // If API returned an unexpected shape, refresh the classes list and return the last one
+          const refreshed = await fetchClasses();
+          if (Array.isArray(refreshed) && refreshed.length > 0) return refreshed[refreshed.length - 1];
+          return null;
+        }
+
+        setClasses((prev) => [...prev, response.data]);
+        return response.data;
       } catch (err) {
         console.error("Error adding class:", err);
         setError(err.message || "Failed to add class");
@@ -70,9 +75,11 @@ export const ClassProvider = ({ children }) => {
       try {
         setLoading(true);
         const response = await axios.put(`/Class/${id}`, { id, ...updatedData });
-        setClasses((prev) => prev.map((c) => (c.id === id ? response.data : c)));
-        if (!response.data || !response.data.id) await fetchClasses();
-        else setClasses((prev) => prev.map((c) => (c.id === id ? response.data : c)));
+        if (!response.data || !response.data.id) {
+          await fetchClasses();
+        } else {
+          setClasses((prev) => prev.map((c) => (c.id === id ? response.data : c)));
+        }
       } catch (err) {
         console.error("Error updating class:", err);
         setError(err.message || "Failed to update class");
@@ -85,11 +92,25 @@ export const ClassProvider = ({ children }) => {
   );
 
   const deleteClass = useCallback(async (id) => {
+    setLoading(true);
     try {
-      setLoading(true);
-      await axios.delete(`/Class/${id}`);
-      setClasses((prev) => prev.filter((c) => c.id !== id));
+      try {
+        await axios.delete(`/Class/${id}`);
+      } catch (firstErr) {
+        const rawBase = import.meta.env.VITE_API_BASE_URL ?? "";
+        const shouldTryAbsolute = (rawBase && rawBase.length > 0) || !import.meta.env.DEV;
+        if (!shouldTryAbsolute) throw firstErr;
 
+        // build absolute URL to try as a fallback
+        let absBase = rawBase && rawBase.length > 0
+          ? (rawBase.endsWith("/api") ? rawBase.replace(/\/$/, "") : rawBase.replace(/\/$/, "") + "/api")
+          : "https://school-discipline.runasp.net/api";
+        const url = `${absBase.replace(/\/$/, "")}/Class/${id}`;
+        await axios.delete(url);
+      }
+
+      // remove locally
+      setClasses((prev) => prev.filter((c) => c.id !== id));
       setSelectedClass((prev) => {
         if (prev?.id === id) {
           localStorage.removeItem("selectedClass");
@@ -99,7 +120,7 @@ export const ClassProvider = ({ children }) => {
       });
     } catch (err) {
       console.error("Error deleting class:", err);
-      setError(err.message || "Failed to delete class");
+      setError(err?.response?.data?.message || err.message || "Failed to delete class");
       throw err;
     } finally {
       setLoading(false);

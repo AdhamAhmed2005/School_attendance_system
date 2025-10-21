@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { TabsContent } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -21,8 +22,29 @@ function Behavior() {
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [form, setForm] = useState({ behaviorType: 0, description: "", date: new Date().toISOString() });
   const [showClassWide, setShowClassWide] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [behaviorToDelete, setBehaviorToDelete] = useState(null);
+  const [deletingBehavior, setDeletingBehavior] = useState(false);
 
-  const behaviorTypeLabels = ["ملاحظة", "مدح", "تحذير", "عقاب"];
+  const behaviorTypeLabels = [
+    "الشغب في وسائل النقل المدرسي",
+    "الخروج المتكرر من الحصص",
+    "التأخر عن العودة إلى الصف",
+    "التأخر الصباحي لأكثر من نصف ساعة",
+    "العبث في ممتلكات المدرسة",
+    "العبث في ممتلكات الأصدقاء",
+    "التفوه بألفاظ غير لائقة",
+    "عدم الالتزام بالزي",
+    "إحضار الممنوعات",
+    "عدم الانضباط في الطابور",
+    "وضع المساحيق",
+    "إصابة طالبة عمدًا عن طريق الضرب",
+    "تناول الأطعمة في الصف",
+    "عدم النزول في الساحة أثناء الطابور والفسحة",
+    "التخويف وإثارة الرعب وممارسة الألعاب",
+    "أخرى",
+  ];
 
   useEffect(() => {
     if (Array.isArray(classes) && classes.length > 0 && !selectedClass) {
@@ -59,6 +81,7 @@ function Behavior() {
     if (!form.behaviorType && form.behaviorType !== 0) return toast.error("اختر نوع السلوك");
 
     try {
+      setAdding(true);
       const payload = {
         studentId: selectedStudent.id,
         classId: selectedClass.id,
@@ -69,11 +92,13 @@ function Behavior() {
       await addBehavior(payload);
       toast.success("تم تسجيل السلوك");
       setForm({ behaviorType: 0, description: "", date: new Date().toISOString() });
-      // reload behaviors for the student
-      await fetchBehaviors(selectedClass.id, selectedStudent.id);
+      // reload behaviors with the same filter currently shown (respect showClassWide)
+      await fetchBehaviors(selectedClass.id, showClassWide ? null : selectedStudent?.id);
     } catch (err) {
       toast.error("حدث خطأ أثناء تسجيل السلوك");
       console.error(err);
+    } finally {
+      setAdding(false);
     }
   };
 
@@ -107,9 +132,9 @@ function Behavior() {
           <CardDescription>تسجيل وإدارة سلوكيات الطالبات</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 m-7">
             <div className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
                 <div>
                   <Label className="block text-sm mb-1">الفصل</Label>
                   <Select value={selectedClass?.id?.toString() || ""} onValueChange={(v) => setSelectedClass(classes.find((c) => c.id?.toString() === v))}>
@@ -165,8 +190,19 @@ function Behavior() {
                 </div>
 
                 <div className="flex gap-3">
-                  <Button type="submit" className="bg-blue-500">سجل السلوك</Button>
-                  <Button type="button" variant="outline" onClick={() => { setForm({ behaviorType: 0, description: "", date: new Date().toISOString() }); }}>إعادة تعيين</Button>
+                  <Button type="submit" className="bg-blue-500" disabled={adding}>
+                    {adding ? (
+                      <span className="inline-flex items-center gap-2">
+                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                        </svg>
+                        جاري الحفظ...
+                      </span>
+                    ) : (
+                      'سجل السلوك'
+                    )}
+                  </Button>
                 </div>
               </form>
             </div>
@@ -193,7 +229,7 @@ function Behavior() {
                           {b.rollNumber && (<div className="text-xs text-gray-500 mt-1">الرقم: {b.rollNumber}</div>)}
                         </div>
                         <div className="flex items-start">
-                          <Button size="sm" variant="ghost" onClick={() => { if (confirm('حذف السجل؟')) deleteBehavior(b.id).then(() => fetchBehaviors(selectedClass.id, selectedStudent?.id)); }}>
+                          <Button size="sm" variant="ghost" className="border" onClick={() => { setBehaviorToDelete(b); setDeleteDialogOpen(true); }}>
                             حذف
                           </Button>
                         </div>
@@ -207,6 +243,32 @@ function Behavior() {
             </div>
           </div>
         </CardContent>
+        <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+          <DialogContent className="sm:max-w-[480px] w-full">
+            <DialogHeader>
+              <DialogTitle>تأكيد الحذف</DialogTitle>
+            </DialogHeader>
+            <div className="py-2">هل أنت متأكد من حذف سجل السلوك؟</div>
+            <div className="flex justify-end gap-2 mt-4">
+              <Button variant="ghost" onClick={() => { setBehaviorToDelete(null); setDeleteDialogOpen(false); }}>إلغاء</Button>
+              <Button variant="destructive" onClick={async () => {
+                if (!behaviorToDelete) return;
+                try {
+                  setDeletingBehavior(true);
+                  await deleteBehavior(behaviorToDelete.id);
+                  await fetchBehaviors(selectedClass.id, showClassWide ? null : selectedStudent?.id);
+                  setDeleteDialogOpen(false);
+                  setBehaviorToDelete(null);
+                } catch (err) {
+                  console.error('Failed to delete behavior', err);
+                  try { await fetchBehaviors(selectedClass.id, showClassWide ? null : selectedStudent?.id); } catch (_) {}
+                } finally {
+                  setDeletingBehavior(false);
+                }
+              }} disabled={deletingBehavior}>{deletingBehavior ? 'جارٍ الحذف...' : 'حذف'}</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       </Card>
     </TabsContent>
   );

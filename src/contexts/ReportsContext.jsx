@@ -81,6 +81,20 @@ export const ReportsProvider = ({ children }) => {
     }
   }, []);
 
+  const deleteReport = useCallback(async (id) => {
+    try {
+      setLoading(true);
+      await axios.delete(`/Reports/${id}`);
+      setReports((prev) => prev.filter((r) => r.id !== id));
+    } catch (err) {
+      console.error("Error deleting report:", err);
+      setError(err.message || "Failed to delete report");
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchReports();
   }, [fetchReports]);
@@ -95,6 +109,7 @@ export const ReportsProvider = ({ children }) => {
         fetchReportById,
         addReport,
         exportReports,
+        deleteReport,
       }}
     >
       {children}

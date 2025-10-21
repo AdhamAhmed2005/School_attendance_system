@@ -157,6 +157,38 @@ body {
       gap: 0.5rem;
     }
   }
+
+  /* Responsive table: convert table to stacked rows on very small screens */
+  @media (max-width: 640px) {
+    .responsive-table thead {
+      display: none;
+    }
+    .responsive-table, .responsive-table tbody, .responsive-table tr, .responsive-table td {
+      display: block;
+      width: 100%;
+    }
+    .responsive-table tr {
+      margin-bottom: 0.75rem;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--border);
+      background: transparent;
+    }
+    .responsive-table td {
+      padding: 0.5rem 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .responsive-table td .label {
+      font-weight: 600;
+      color: var(--muted-foreground);
+      margin-right: 0.5rem;
+    }
+    .responsive-table td .value {
+      color: var(--foreground);
+      text-align: left;
+    }
+  }
 }
 
 ::-webkit-scrollbar-track {

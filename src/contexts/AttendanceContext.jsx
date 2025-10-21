@@ -1,10 +1,30 @@
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, useRef } from "react";
 import axios from "axios";
+
+// Normalize a Date/ISO string to a date-only key YYYY-MM-DD using local date components.
+// This avoids timezone shifts caused by toISOString() and ensures consistent comparisons.
+const toDateKey = (d) => {
+  try {
+    const dt = d ? new Date(d) : new Date();
+    const yyyy = dt.getFullYear();
+    const mm = String(dt.getMonth() + 1).padStart(2, "0");
+    const dd = String(dt.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  } catch (e) {
+    // Fallback to ISO slice if something unexpected is passed
+    try {
+      return new Date(d).toISOString().slice(0, 10);
+    } catch (e2) {
+      return new Date().toISOString().slice(0, 10);
+    }
+  }
+};
 
 const AttendanceContext = createContext();
 
 export const AttendanceProvider = ({ children }) => {
   const [attendanceRecords, setAttendanceRecords] = useState([]);
+  const initializedDatesRef = useRef(new Set());
   const [attendanceNotFound, setAttendanceNotFound] = useState(false);
   const [lastErrorDetail, setLastErrorDetail] = useState(null);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
@@ -60,6 +80,24 @@ export const AttendanceProvider = ({ children }) => {
         params: { classId, date },
       });
       const newRecords = Array.isArray(response.data) ? response.data : response.data ? [response.data] : [];
+      if (!newRecords || newRecords.length === 0) {
+        // No attendance rows yet for this class/date — start initializer in background so UI is not blocked
+        try {
+          if (classId) {
+            // fire-and-forget: initializer will merge results into context and emit an event when done
+            initializeAttendanceForClass(classId, date || new Date().toISOString()).catch((e) => {
+              console.warn("initializeAttendanceForClass (background) failed:", e);
+            });
+            setAttendanceNotFound(false);
+            return [];
+          }
+        } catch (initErr) {
+          console.warn("initializeAttendanceForClass failed during fetchClassAttendanceByDate:", initErr);
+          setAttendanceNotFound(true);
+          return [];
+        }
+      }
+
       setAttendanceRecords((prev) => {
         const existingIds = new Set(prev.map((r) => r.id));
         const unique = newRecords.filter((r) => !existingIds.has(r.id));
@@ -78,8 +116,18 @@ export const AttendanceProvider = ({ children }) => {
             "AttendanceContext.fetchClassAttendanceByDate: 404 - no attendance for class/date",
             { classId, date }
           );
-          setAttendanceNotFound(true);
-          return [];
+          // Try to initialize attendance rows automatically when server reports 404
+          try {
+            if (classId) {
+              const created = await initializeAttendanceForClass(classId, date || new Date().toISOString());
+              setAttendanceNotFound(false);
+              return created || [];
+            }
+          } catch (initErr) {
+            console.warn("initializeAttendanceForClass failed after 404:", initErr);
+            setAttendanceNotFound(true);
+            return [];
+          }
         }
       } catch (inner) {
         // fall through to normal error handling below
@@ -104,6 +152,17 @@ export const AttendanceProvider = ({ children }) => {
   }, []);
 
   const addAttendance = useCallback(async (attendanceData) => {
+    // lightweight logger for outgoing requests (keeps recent N)
+    const logReq = (entry) => {
+      try {
+        if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+        window.__attendanceLastRequests.unshift({ ts: Date.now(), ...entry });
+        if (window.__attendanceLastRequests.length > 100) window.__attendanceLastRequests.length = 100;
+      } catch (e) {
+        // ignore logging failures
+      }
+    };
+
     try {
       setLoading(true);
       // Accept either an array of records or a wrapper object { dto: [...] }
@@ -113,141 +172,171 @@ export const AttendanceProvider = ({ children }) => {
         ? attendanceData.dto
         : [];
 
-      // Normalize date fields and dedupe by studentId/classId/date
-      const normalizedInput = rawList.map((r) => ({
+      // Normalize dates
+      const normalized = rawList.map((r) => ({
         ...r,
         date: r?.date ? new Date(r.date).toISOString() : new Date().toISOString(),
       }));
 
-      const uniqueData = normalizedInput.filter((record, index, self) =>
-        index ===
-        self.findIndex((r) => r.studentId === record.studentId && r.classId === record.classId && r.date === record.date)
-      );
-
-      if (uniqueData.length === 0) {
-        console.log("✅ No new attendance to add");
-        return [];
+      // Group normalized records by classId + date (YYYY-MM-DD) so we can fetch existing server records
+      const groups = new Map();
+      for (const r of normalized) {
+        const dateKey = toDateKey(r.date);
+        const groupKey = `${r.classId}::${dateKey}`;
+        if (!groups.has(groupKey)) groups.set(groupKey, { classId: r.classId, date: dateKey, items: [] });
+        groups.get(groupKey).items.push(r);
       }
 
-      let existingData = [];
-      try {
-        const existing = await axios.get("/Attendance/class-attendance-by-date", {
-          params: {
-            classId: uniqueData[0]?.classId,
-            date: uniqueData[0]?.date,
-          },
-        });
-        existingData = Array.isArray(existing.data) ? existing.data : existing.data ? [existing.data] : [];
-      } catch (getErr) {
-        // If no attendance exists yet for that class/date, backend may return 404 — treat as empty list
+      const toUpdate = [];
+      const toCreate = [];
+
+      // For each class/date group, fetch server attendance for that date to determine existing ids
+      for (const [groupKey, group] of groups.entries()) {
+        const { classId, date, items } = group;
+        let serverRecords = [];
         try {
-          if (axios.isAxiosError && axios.isAxiosError(getErr) && getErr.response && getErr.response.status === 404) {
-            existingData = [];
-          } else {
-            throw getErr;
-          }
-        } catch (inner) {
-          // rethrow if it's not the 404 case
-          throw getErr;
+          const resp = await axios.get("/Attendance/class-attendance-by-date", { params: { classId, date } });
+          serverRecords = Array.isArray(resp.data) ? resp.data : resp.data ? [resp.data] : [];
+        } catch (fetchErr) {
+          // If fetching fails, fall back to local state as best-effort
+          serverRecords = attendanceRecords.filter((rec) => {
+            try {
+              return rec.classId === classId && toDateKey(rec.date) === date;
+            } catch (e) {
+              return false;
+            }
+          });
         }
-      }
 
-      const existingMap = new Set(existingData.map((r) => `${r.studentId}-${r.classId}-${r.date}`));
+        // Build lookups of server records by studentId and name
+        const lookupByStudent = new Map();
+        const lookupByName = new Map();
+        for (const sr of serverRecords) {
+          const sid = sr.studentId ?? sr.student?.id ?? null;
+          if (sid != null) lookupByStudent.set(String(sid), sr);
+          const nm = (sr.name ?? sr.student?.name ?? "").trim();
+          if (nm) lookupByName.set(nm, sr);
+        }
 
-      const newRecords = uniqueData.filter((r) => !existingMap.has(`${r.studentId}-${r.classId}-${r.date}`));
-
-      if (newRecords.length === 0) {
-        console.log("✅ All records already exist — nothing to add.");
-        return [];
-      }
-
-      // Try multiple payload shapes and retry on transient 5xx errors.
-      // Candidate payloads (order depends on size):
-      // - single object (for single-record creates)
-      // - wrapper { dto: [...] }
-      // - raw array [...]
-      const postAttempts = [];
-      if (newRecords.length === 1) postAttempts.push(newRecords[0]);
-      postAttempts.push({ dto: newRecords });
-      postAttempts.push(newRecords);
-
-      // helper: attempt a POST with limited retries on 5xx
-      const attemptPostWithRetries = async (payload, maxRetries = 2) => {
-        let lastErr = null;
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        // Build a full update payload for this class/date: include every server record, merging incoming changes
+        for (const sr of serverRecords) {
           try {
-            // eslint-disable-next-line no-console
-            console.info("Attempting POST /Attendance", { attempt, payloadPreview: Array.isArray(payload) ? payload.slice(0, 5) : payload });
-            const res = await axios.post("/Attendance", payload);
-            return res;
-          } catch (errAttempt) {
-            lastErr = errAttempt;
-            const status = errAttempt?.response?.status;
-            // only retry for 5xx server errors or network-level issues
-            if (status && status >= 500 && status < 600) {
-              // exponential backoff
-              const wait = 150 * Math.pow(2, attempt);
-              // eslint-disable-next-line no-await-in-loop
-              await new Promise((r) => setTimeout(r, wait));
+            const sidKey = sr.studentId != null ? String(sr.studentId) : null;
+            const nm = (sr.name ?? sr.student?.name ?? "").trim();
+            // find incoming change for this student if provided
+            const incoming = items.find((it) => (it.studentId != null && String(it.studentId) === String(sr.studentId)) || (it.name && String(it.name).trim() === nm));
+            toUpdate.push({ id: sr.id, studentId: sr.studentId, classId: sr.classId ?? classId, date: toDateKey(sr.date ?? date), isAbsent: incoming ? !!incoming.isAbsent : !!sr.isAbsent });
+          } catch (e) {
+            // ignore malformed server record
+          }
+        }
+
+        // Any incoming items not matched to an existing server record should be created
+        for (const r of items) {
+          const sidKey = r.studentId != null ? String(r.studentId) : null;
+          const nameKey = r.name ? String(r.name).trim() : null;
+          let matched = false;
+          if (sidKey && lookupByStudent.has(sidKey)) matched = true;
+          else if (nameKey && lookupByName.has(nameKey)) matched = true;
+          if (!matched) {
+            // Do NOT create attendance rows using name-only payloads — require studentId to avoid implicit student creation
+            if (r.studentId == null) {
+              // record skipped attempts for debugging
+              setLastErrorDetail((d) => ({ ...(d || {}), phase: 'addAttendance-skip-name-only', attempted: r }));
+              setShowDebugPanel(true);
+              // skip
               continue;
             }
-            // Non-retryable error — rethrow
-            throw errAttempt;
+            toCreate.push({ studentId: r.studentId, classId: r.classId, date: toDateKey(r.date), isAbsent: !!r.isAbsent });
           }
         }
-        // After retries, throw the last error
-        throw lastErr;
-      };
+      }
 
-      let response;
-      let lastAttemptDetail = null;
-      for (const candidate of postAttempts) {
-        try {
-          response = await attemptPostWithRetries(candidate, 2);
-          // success - break
-          lastAttemptDetail = { payloadType: Array.isArray(candidate) ? "array" : typeof candidate === "object" && candidate.dto ? "wrapper" : "object", payloadPreview: Array.isArray(candidate) ? candidate.slice(0, 5) : candidate };
-          break;
-        } catch (attemptErr) {
-          // record attempt detail and try next candidate
-          lastAttemptDetail = { error: attemptErr?.toJSON ? attemptErr.toJSON() : attemptErr, candidatePreview: Array.isArray(candidate) ? candidate.slice(0, 5) : candidate };
-          // continue to next candidate
+      const results = [];
+
+      // First, update existing records one-by-one to avoid any server-side batch replace behavior
+      if (toUpdate.length > 0) {
+        for (const upd of toUpdate) {
+          // skip invalid ids such as 0 or falsy
+          if (!upd.id || String(upd.id).trim() === "0") {
+            if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+            window.__attendanceLastRequests.unshift({ ts: Date.now(), skippedUpdate: true, reason: 'invalid-id', payload: upd });
+            continue;
+          }
+          try {
+            logReq({ method: 'PUT', url: `/Attendance/${encodeURIComponent(upd.id)}`, payload: upd });
+            const resp = await axios.put(`/Attendance/${encodeURIComponent(upd.id)}`, upd);
+            const returned = resp?.data;
+            logReq({ method: 'PUT:response', url: `/Attendance/${encodeURIComponent(upd.id)}`, response: returned });
+            if (returned) {
+              // merge single returned updated record
+              setAttendanceRecords((prev) => {
+                const map = new Map(prev.map((r) => [r.id, r]));
+                const single = Array.isArray(returned) ? returned[0] : returned;
+                if (single && single.id) map.set(single.id, single);
+                return Array.from(map.values());
+              });
+              const single = Array.isArray(returned) ? returned[0] : returned;
+              if (single) results.push(single);
+            }
+          } catch (itemErr) {
+            const axiosJson = typeof itemErr?.toJSON === "function" ? itemErr.toJSON() : undefined;
+            const detail = { phase: "addAttendance-update-one", id: upd.id, payload: upd, axiosError: axiosJson, config: itemErr?.config, status: itemErr?.response?.status, response: itemErr?.response?.data, message: itemErr?.message };
+            setLastErrorDetail((d) => ({ ...(d || {}), ...(detail || {}) }));
+            setShowDebugPanel(true);
+            console.error("Error updating attendance for id", upd.id, detail);
+          }
         }
       }
 
-      if (!response) {
-        // If no candidate succeeded, throw a composed error so diagnostics include attempted shapes
-        const composed = new Error("All POST /Attendance attempts failed");
-        composed.attempts = lastAttemptDetail;
-        throw composed;
+      // Then, create missing records one-by-one (backend expects single object POST)
+      if (toCreate.length > 0) {
+        for (const c of toCreate) {
+          try {
+            // guard: ensure studentId is valid (non-falsy, not '0') before calling POST
+            if (!c.studentId || String(c.studentId).trim() === "0") {
+              logReq({ method: 'POST-skipped', url: '/Attendance', reason: 'invalid-studentId', payload: c });
+              setLastErrorDetail((d) => ({ ...(d || {}), phase: 'addAttendance-invalid-studentId', payload: c }));
+              setShowDebugPanel(true);
+              continue;
+            }
+            logReq({ method: 'POST', url: '/Attendance', payload: c });
+            const r = await axios.post("/Attendance", c);
+            const returned = r?.data;
+            logReq({ method: 'POST:response', url: '/Attendance', response: returned });
+            if (returned) {
+              const single = Array.isArray(returned) ? returned[0] : returned;
+              // merge single into state
+              setAttendanceRecords((prev) => {
+                const map = new Map(prev.map((rec) => [rec.id, rec]));
+                if (single && single.id) map.set(single.id, single);
+                return Array.from(map.values());
+              });
+              results.push(single);
+            }
+          } catch (postErr) {
+            console.warn("addAttendance: POST failed for create", postErr?.message || postErr);
+            setLastErrorDetail((d) => ({ ...(d || {}), phase: "addAttendance-create", payload: c, message: postErr?.message, response: postErr?.response?.data }));
+          }
+        }
       }
 
-      setAttendanceRecords((prev) => {
-        const existingKeys = new Set(prev.map((r) => `${r.studentId}-${r.classId}-${r.date}`));
-        const filteredNew = response.data.filter((r) => !existingKeys.has(`${r.studentId}-${r.classId}-${r.date}`));
-        return [...prev, ...filteredNew];
-      });
-
-      return response.data;
+      return results;
     } catch (err) {
-      // Capture extra diagnostics for server 500; axios errors can be empty on network failures
       const axiosJson = typeof err?.toJSON === "function" ? err.toJSON() : undefined;
       const detail = {
-        phase: "addAttendance",
+        phase: "addAttendance-update-multiple",
         payloadPreview: Array.isArray(attendanceData) ? attendanceData.slice(0, 10) : attendanceData,
         axiosError: axiosJson,
         config: err?.config,
         status: err?.response?.status,
         response: err?.response?.data,
-        responseHeaders: err?.response?.headers,
-        request: err?.request,
         message: err?.message,
       };
       setLastErrorDetail(detail);
-      // Show the debug panel in the UI so developer can copy diagnostics
       setShowDebugPanel(true);
-      // eslint-disable-next-line no-console
-      console.error("Error adding attendance:", detail);
-      setError(err.message || "Failed to add attendance");
+      console.error("Error updating attendance (update-multiple):", detail);
+      setError(err.message || "Failed to update attendance");
       throw err;
     } finally {
       setLoading(false);
@@ -265,7 +354,7 @@ export const AttendanceProvider = ({ children }) => {
             return (
               (r.studentId === updatedData.studentId || r.studentId === updatedData.studentId) &&
               (r.classId === updatedData.classId || r.classId === updatedData.classId) &&
-              (new Date(r.date).toISOString().slice(0, 10) === new Date(updatedData.date).toISOString().slice(0, 10))
+              toDateKey(r.date) === toDateKey(updatedData.date)
             );
           } catch (e) {
             return false;
@@ -297,7 +386,7 @@ export const AttendanceProvider = ({ children }) => {
         await addAttendance([updatedData]);
         // Fetch the latest attendance for this student/class/date from server or local state
         // We won't rely on the response here; attempt to find the created record in local state
-        const found = attendanceRecords.find((r) => r.studentId === updatedData.studentId && r.classId === updatedData.classId && new Date(r.date).toISOString().slice(0,10) === new Date(updatedData.date).toISOString().slice(0,10));
+  const found = attendanceRecords.find((r) => r.studentId === updatedData.studentId && r.classId === updatedData.classId && toDateKey(r.date) === toDateKey(updatedData.date));
         if (found && found.id) {
           useId = found.id;
           response = { data: found };
@@ -353,6 +442,110 @@ export const AttendanceProvider = ({ children }) => {
     }
   }, []);
 
+  // Ensure attendance records exist for all students in a class for a given date.
+  // This will call POST /Attendance with a wrapper { dto: [...] } and merge the created records.
+  const initializeAttendanceForClass = useCallback(
+    async (classId, date = new Date().toISOString()) => {
+      const dateKey = toDateKey(date);
+      const initKey = `${classId}::${dateKey}`;
+      if (initializedDatesRef.current.has(initKey)) return [];
+      // mark as initializing
+      initializedDatesRef.current.add(initKey);
+      try {
+        setLoading(true);
+        // Fetch students for the class from the API
+        const studentsRes = await axios.get(`/Student?classId=${encodeURIComponent(classId)}`);
+        const students = Array.isArray(studentsRes.data) ? studentsRes.data : studentsRes.data ? [studentsRes.data] : [];
+
+        if (!students || students.length === 0) return [];
+
+        // Fetch existing server attendance for this class/date
+        let serverRecords = [];
+        try {
+          const resp = await axios.get("/Attendance/class-attendance-by-date", { params: { classId, date: dateKey } });
+          serverRecords = Array.isArray(resp.data) ? resp.data : resp.data ? [resp.data] : [];
+        } catch (fetchErr) {
+          serverRecords = attendanceRecords.filter((rec) => {
+            try {
+              return rec.classId === classId && toDateKey(rec.date) === dateKey;
+            } catch (e) {
+              return false;
+            }
+          });
+        }
+
+        const existingByStudent = new Set(serverRecords.map((r) => String(r.studentId ?? r.student?.id ?? "")));
+
+        // Collect students which need creation, but skip any with invalid id or empty name.
+        const toCreate = [];
+        for (const s of students) {
+          const sid = s.id ?? s.studentId ?? null;
+          const name = s.name ? String(s.name).trim() : "";
+          if (!sid || String(sid).trim() === "0") {
+            // skip invalid id
+            if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+            window.__attendanceLastRequests.unshift({ ts: Date.now(), skippedInitializer: true, reason: 'invalid-studentId', student: s });
+            continue;
+          }
+          if (!name) {
+            // skip students without a name to avoid creating blank students
+            if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+            window.__attendanceLastRequests.unshift({ ts: Date.now(), skippedInitializer: true, reason: 'empty-name', student: s });
+            continue;
+          }
+          if (!existingByStudent.has(String(sid))) toCreate.push(s);
+        }
+
+        const created = [];
+
+        // concurrency-limited creation
+        const concurrency = 6;
+        const runBatch = async (batch) => Promise.all(batch.map(async (s) => {
+          try {
+            const payload = { studentId: s.id, classId, date: dateKey, isAbsent: false };
+            const r = await axios.post("/Attendance", payload);
+            const returned = r?.data;
+            if (returned) {
+              const single = Array.isArray(returned) ? returned[0] : returned;
+              setAttendanceRecords((prev) => {
+                const map = new Map(prev.map((rec) => [rec.id, rec]));
+                if (single && single.id) map.set(single.id, single);
+                return Array.from(map.values());
+              });
+              created.push(single);
+            }
+          } catch (postErr) {
+            console.warn(`initializeAttendanceForClass: POST failed for student ${s.id}`, postErr?.message || postErr);
+            setLastErrorDetail((d) => ({ ...(d || {}), phase: "initializeAttendanceForClass-post", studentId: s.id, message: postErr?.message, response: postErr?.response?.data }));
+          }
+        }));
+
+        for (let i = 0; i < toCreate.length; i += concurrency) {
+          const batch = toCreate.slice(i, i + concurrency);
+          // eslint-disable-next-line no-await-in-loop
+          await runBatch(batch);
+        }
+
+        // emit event
+        try {
+          window.dispatchEvent(new CustomEvent("attendance:initialized", { detail: { classId, date: dateKey, createdCount: created.length } }));
+        } catch (e) {
+          // ignore
+        }
+
+        return created;
+      } catch (err) {
+        console.error("initializeAttendanceForClass failed:", err);
+        setLastErrorDetail({ phase: "initializeAttendanceForClass", classId, date, message: err?.message, response: err?.response?.data });
+        setShowDebugPanel(true);
+        throw err;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [attendanceRecords, setAttendanceRecords]
+  );
+
   useEffect(() => {
     fetchAttendance();
   }, [fetchAttendance]);
@@ -372,6 +565,7 @@ export const AttendanceProvider = ({ children }) => {
         fetchAttendanceByStudent,
         fetchClassAttendanceByDate,
         addAttendance,
+        initializeAttendanceForClass,
         updateAttendance,
         deleteAttendance,
       }}
