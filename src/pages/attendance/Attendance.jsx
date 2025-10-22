@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, memo } from "react";
 import axios from "axios";
 import { useAttendance } from "@/contexts/AttendanceContext";
 import { useStudent } from "@/contexts/StudentContext";
@@ -20,6 +20,89 @@ import {
   AlertDialogCancel,
 } from "@/components/ui/alert-dialog";
 
+// Memoized row to avoid full-table re-renders. Re-renders only when student props or saving state change.
+const StudentRow = memo(function StudentRow({ student, index, onDelete, onToggle, onToggleExcusedLocal, saving }) {
+  const idKey = student.studentId ?? `${student.name}-${index}`;
+  // DEBUG: trace per-row renders
+  try { console.debug(`[Render] StudentRow ${idKey} isAbsent=${!!student.isAbsent} isExcused=${!!student.isExcused} saving=${!!saving}`); } catch (e) {}
+  const [localExcused, setLocalExcused] = useState(!!student.isExcused);
+  // keep local state in sync if parent prop changes (e.g., after reload)
+  useEffect(() => {
+    setLocalExcused(!!student.isExcused);
+  }, [student.isExcused]);
+  return (
+    <TableRow key={idKey}>
+      <TableCell className="text-center">
+        <div className="flex items-center justify-center">
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={!student.studentId || !!saving}
+            onClick={() => onDelete(student)}
+          >
+            <Trash2 className="h-4 w-4 text-red-600" />
+          </Button>
+        </div>
+      </TableCell>
+
+      <TableCell className="flex flex-row-reverse items-center justify-center gap-4">
+        <Switch
+          checked={!student.isAbsent}
+          onCheckedChange={(checked) => onToggle(student, checked)}
+          disabled={!!saving}
+          className={`rotate-180 ${student.isAbsent ? 'bg-red-100/80' : 'bg-green-100/80'}`}
+        />
+        <div className="flex items-center gap-2">
+          <span className={`${student.isAbsent ? 'text-red-500' : 'text-green-700'} font-bold`}>
+            {student.isAbsent ? 'غائب' : 'حاضر'}
+          </span>
+          {saving && <Loader2 className="animate-spin h-4 w-4 text-gray-400" />}
+        </div>
+      </TableCell>
+
+      <TableCell className="text-center">
+        <div className="flex items-center justify-center gap-2">
+          <div className="flex items-center gap-2">
+            <Switch
+              checked={localExcused}
+              onCheckedChange={(checked) => {
+                // update label locally without telling parent to re-render
+                setLocalExcused(!!checked);
+                onToggleExcusedLocal(student, checked);
+              }}
+              disabled={!!saving}
+              className={`${localExcused ? 'bg-yellow-100/90' : 'bg-gray-100/80'}`}
+            />
+            <span className={`text-sm ${localExcused ? 'text-yellow-700 font-semibold' : 'text-gray-600'}`}>
+              {localExcused ? 'مع عذر' : 'بدون عذر'}
+            </span>
+            {saving && <Loader2 className="animate-spin h-4 w-4 text-gray-400" />}
+          </div>
+        </div>
+      </TableCell>
+
+      <TableCell className="text-right">
+        <div className="flex flex-col items-end">
+          <span>{student.name}</span>
+        </div>
+      </TableCell>
+      <TableCell className="text-right hidden sm:table-cell">
+        <div className="hidden sm:flex items-center justify-end gap-2">
+          <span>{student.rollNumber ?? index + 1}</span>
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}, (prevProps, nextProps) => {
+  // Only re-render when the student absent/excused state or saving state changes
+  return (
+    prevProps.student.studentId === nextProps.student.studentId &&
+    prevProps.student.isAbsent === nextProps.student.isAbsent &&
+    prevProps.student.isExcused === nextProps.student.isExcused &&
+    prevProps.saving === nextProps.saving
+  );
+});
+
 function Attendance() {
   const { fetchClassAttendanceByDate, addAttendance, updateAttendance, loading, attendanceNotFound, lastErrorDetail, clearLastError, showDebugPanel, setShowDebugPanel } = useAttendance();
   const { selectedClass, selectedDate, updateClass, setSelectedClass } = useClass();
@@ -30,6 +113,9 @@ function Attendance() {
   const [dirtyKeys, setDirtyKeys] = useState(new Set());
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
+
+  // DEBUG: trace Attendance parent render
+  try { console.debug(`[Render] Attendance parent - rows=${attendanceData.length} savingCount=${savingIds.size}`); } catch (e) {}
 
   const loadAttendance = useCallback(async () => {
     try {
@@ -74,14 +160,15 @@ function Attendance() {
           const name = String(rawName).trim().replace(/\s+/g, " ");
           const rollNumber = a.rollNumber ?? a.student?.rollNumber ?? null;
           const isAbsent = typeof a.isAbsent === "boolean" ? a.isAbsent : !!a.absent;
-          return { ...a, studentId, name, rollNumber, isAbsent };
+          const isExcused = typeof a.isExcused === "boolean" ? a.isExcused : !!a.excused;
+          return { ...a, studentId, name, rollNumber, isAbsent, isExcused };
         })
         .filter((n) => (n.studentId !== null) || (n.name && n.name.length > 0));
 
       const attendanceMap = new Map();
       for (const n of normalized) {
         const key = n.studentId != null ? String(n.studentId) : n.name;
-        attendanceMap.set(key, { studentId: n.studentId, name: n.name, rollNumber: n.rollNumber, isAbsent: n.isAbsent, id: n.id });
+        attendanceMap.set(key, { studentId: n.studentId, name: n.name, rollNumber: n.rollNumber, isAbsent: n.isAbsent, isExcused: n.isExcused, id: n.id });
       }
 
       // If we have a roster, build rows from it and merge any attendance flags; otherwise use attendance list
@@ -109,7 +196,7 @@ function Attendance() {
           rollNumber: n.rollNumber,
           isAbsent: n.isAbsent,
           id: n.id,
-        }));
+  }));
         // filter out rows without a valid studentId
         const filteredDeduped = deduped.filter((p) => p.studentId != null && String(p.studentId).trim() !== "" && String(p.studentId).trim() !== "0");
         setAttendanceData(filteredDeduped);
@@ -127,7 +214,7 @@ function Attendance() {
 
   // student: row object; checked: (optional) new checked state from Switch (true == present)
   // Toggle only updates UI and marks the row dirty. Saving is done by the Save button which will persist one-by-one.
-  const handleToggle = (student, checked) => {
+  const handleToggle = useCallback((student, checked) => {
     const key = String(student.studentId ?? student.name ?? "unknown");
     // determine new isAbsent value (checked=true means present)
     const newIsAbsent = typeof checked === "boolean" ? !checked : !student.isAbsent;
@@ -141,7 +228,117 @@ function Attendance() {
       copy.add(key);
       return copy;
     });
+  }, [setAttendanceData, setDirtyKeys]);
+
+  // Toggle excused state for a student (marks row dirty for saving)
+  const handleToggleExcused = (student, checked) => {
+    const key = String(student.studentId ?? student.name ?? "unknown");
+    const newIsExcused = typeof checked === "boolean" ? !!checked : !student.isExcused;
+
+    setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(student.studentId ?? student.name ?? "") ? { ...item, isExcused: newIsExcused } : item)));
+
+    setDirtyKeys((s) => {
+      const copy = new Set(s);
+      copy.add(key);
+      return copy;
+    });
   };
+
+  // Save a single student's attendance (useful for debugging server-side batch issues)
+  const handleSaveSingle = async (student) => {
+    try {
+      if (!selectedClass?.id) {
+        toast.error("الرجاء اختيار فصل دراسي أولاً");
+        return;
+      }
+      const isoDate = selectedDate.toISOString();
+      // Save single row using same sequential logic: create if missing, otherwise update
+      const key = String(student.studentId ?? student.name ?? "unknown");
+      setSavingIds((s) => new Set([...(Array.from(s) || []), key]));
+  if (!student.id) {
+        // Do not allow creating attendance rows by providing only a name — require a truthy studentId.
+        if (!student.studentId || String(student.studentId).trim() === "0") {
+          toast.error('لا يمكن حفظ طالبة بدون معرف صالح. أضف الطالبة أولاً عبر قائمة الطلاب.');
+        } else {
+          const payload = [{
+            studentId: student.studentId,
+            classId: selectedClass.id,
+            date: isoDate,
+            isAbsent: !!student.isAbsent,
+            isExcused: !!student.isExcused,
+          }];
+          const created = await addAttendance(payload);
+          let createdRec = null;
+          if (Array.isArray(created) && created.length > 0) createdRec = created[0];
+          else if (created && typeof created === "object") createdRec = created;
+          if (createdRec && createdRec.id) {
+            setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(student.studentId ?? student.name ?? "") ? { ...item, id: createdRec.id, isAbsent: !!createdRec.isAbsent } : item)));
+          }
+          return createdRec;
+        }
+      } else {
+        const updated = await updateAttendance(student.id, {
+          id: student.id,
+          studentId: student.studentId,
+          classId: selectedClass.id,
+          date: isoDate,
+          isAbsent: !!student.isAbsent,
+          isExcused: !!student.isExcused,
+        });
+        return updated;
+      }
+      setSavingIds((s) => {
+        const copy = new Set(s);
+        copy.delete(key);
+        return copy;
+      });
+      setDirtyKeys((s) => {
+        const copy = new Set(s);
+        copy.delete(key);
+        return copy;
+      });
+      toast.success(`تم حفظ حالة ${student.name || student.studentId}`);
+    } catch (err) {
+      console.error('Error saving single attendance', err);
+      toast.error('خطأ عند حفظ سجل واحد — تحقق من لوحة التصحيح');
+      return null;
+    }
+  };
+
+  // Improved UX: when toggling excused, auto-save the single row with optimistic UI and per-row spinner
+  const handleToggleExcusedAndSave = useCallback(async (student, checked) => {
+    const key = String(student.studentId ?? student.name ?? "unknown");
+    // Do NOT update parent state immediately; row handles local label for snappy UX
+
+    // mark saving for this row
+    setSavingIds((s) => new Set([...(Array.from(s) || []), key]));
+
+    try {
+      // attempt to save single row; this will call add or update depending on presence of id
+      const saved = await handleSaveSingle({ ...student, isExcused: typeof checked === 'boolean' ? !!checked : !student.isExcused });
+      if (saved) {
+        // Merge only the saved student into attendanceData to avoid full re-renders
+        setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(saved.studentId ?? saved.student?.id ?? saved.id ?? '') ? { ...item, isExcused: typeof saved.isExcused === 'boolean' ? saved.isExcused : !!saved.excused, id: saved.id ?? item.id } : item)));
+      }
+      toast.success('تم حفظ حالة العذر');
+    } catch (err) {
+      console.error('Failed to auto-save excused toggle', err);
+      toast.error('فشل حفظ حالة العذر');
+      // on error, revert the optimistic change by reloading attendance
+      await loadAttendance();
+    } finally {
+      setSavingIds((s) => {
+        const copy = new Set(s);
+        copy.delete(key);
+        return copy;
+      });
+      setDirtyKeys((s) => {
+        const copy = new Set(s);
+        copy.delete(key);
+        return copy;
+      });
+    }
+  }, [handleToggleExcused, handleSaveSingle, loadAttendance]);
 
   const handleSave = async () => {
     // Save all rows as a single batch array via addAttendance
@@ -163,6 +360,7 @@ function Attendance() {
         classId: selectedClass.id,
         date: isoDate,
         isAbsent: !!r.isAbsent,
+        isExcused: !!r.isExcused,
       };
       // include id only when present (don't hard-code 0)
   // include id only when present and a valid non-zero value
@@ -209,6 +407,7 @@ function Attendance() {
                 name: existing.name ?? u.name ?? existing.name,
                 rollNumber: existing.rollNumber ?? u.rollNumber,
                 isAbsent: typeof u.isAbsent === "boolean" ? u.isAbsent : !!u.absent,
+                isExcused: typeof u.isExcused === "boolean" ? u.isExcused : !!u.excused,
                 id: u.id ?? existing.id,
               });
             } catch (e) {
@@ -233,61 +432,7 @@ function Attendance() {
     }
   };
 
-  // Save a single student's attendance (useful for debugging server-side batch issues)
-  const handleSaveSingle = async (student) => {
-    try {
-      if (!selectedClass?.id) {
-        toast.error("الرجاء اختيار فصل دراسي أولاً");
-        return;
-      }
-      const isoDate = selectedDate.toISOString();
-      // Save single row using same sequential logic: create if missing, otherwise update
-      const key = String(student.studentId ?? student.name ?? "unknown");
-      setSavingIds((s) => new Set([...(Array.from(s) || []), key]));
-      if (!student.id) {
-        // Do not allow creating attendance rows by providing only a name — require a truthy studentId.
-        if (!student.studentId || String(student.studentId).trim() === "0") {
-          toast.error('لا يمكن حفظ طالبة بدون معرف صالح. أضف الطالبة أولاً عبر قائمة الطلاب.');
-        } else {
-          const payload = [{
-            studentId: student.studentId,
-            classId: selectedClass.id,
-            date: isoDate,
-            isAbsent: !!student.isAbsent,
-          }];
-          const created = await addAttendance(payload);
-        let createdRec = null;
-        if (Array.isArray(created) && created.length > 0) createdRec = created[0];
-        else if (created && typeof created === "object") createdRec = created;
-        if (createdRec && createdRec.id) {
-          setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(student.studentId ?? student.name ?? "") ? { ...item, id: createdRec.id, isAbsent: !!createdRec.isAbsent } : item)));
-        }
-      }
-    } else {
-        await updateAttendance(student.id, {
-          id: student.id,
-          studentId: student.studentId,
-          classId: selectedClass.id,
-          date: isoDate,
-          isAbsent: !!student.isAbsent,
-        });
-      }
-      setSavingIds((s) => {
-        const copy = new Set(s);
-        copy.delete(key);
-        return copy;
-      });
-      setDirtyKeys((s) => {
-        const copy = new Set(s);
-        copy.delete(key);
-        return copy;
-      });
-      toast.success(`تم حفظ حالة ${student.name || student.studentId}`);
-    } catch (err) {
-      console.error('Error saving single attendance', err);
-      toast.error('خطأ عند حفظ سجل واحد — تحقق من لوحة التصحيح');
-    }
-  };
+  
   
   const handleToggleAll = (present) => {
     setAttendanceData((prev) => prev.map((p) => ({ ...p, isAbsent: !present })));
@@ -353,64 +498,32 @@ function Attendance() {
                     <div className="overflow-x-auto">
                       <Table className="responsive-table">
                         <TableHeader>
-                          <TableRow className="bg-neutral-100">
+                            <TableRow className="bg-neutral-100">
                             {/* Delete column on the left side */}
                             <TableHead className="text-center">حذف</TableHead>
                             <TableHead className="text-center">الحضور</TableHead>
+                            <TableHead className="text-center">عذر</TableHead>
                             <TableHead className="text-right">اسم الطالب</TableHead>
                             {/* hide roll number on very small screens to avoid cramped layout */}
                             <TableHead className="text-right hidden sm:table-cell">رقم الطالب</TableHead>
                           </TableRow>
                         </TableHeader>
-                        <TableBody>
+                          <TableBody>
                             {Array.isArray(attendanceData) && attendanceData
                               .filter((s) => s.studentId && String(s.studentId).trim() !== "" && String(s.studentId).trim() !== "0")
                               .map((student, index) => {
                               const idKey = student.studentId ?? `${student.name}-${index}`;
                               return (
-                                <TableRow key={idKey}>
-                                {/* Delete button cell placed first (left side) */}
-                                <TableCell className="text-center">
-                                  <div className="flex items-center justify-center">
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      disabled={!student.studentId || savingIds.has(String(student.studentId))}
-                                      onClick={() => {
-                                        if (!student.studentId) {
-                                          toast.error("لا يمكن حذف طالبة بدون معرف");
-                                          return;
-                                        }
-                                        setDeleteTarget(student);
-                                        setDeleteDialogOpen(true);
-                                      }}
-                                    >
-                                      <Trash2 className="h-4 w-4 text-red-600" />
-                                    </Button>
-                                  </div>
-                                </TableCell>
-
-                                <TableCell className="flex flex-row-reverse items-center justify-center gap-4">
-                                  <Switch checked={!student.isAbsent} onCheckedChange={(checked) => handleToggle(student, checked)} disabled={savingIds.has(student.studentId ?? student.name)} className="rotate-180" />
-                                  <div className="flex items-center gap-2">
-                                    <span className={`${student.isAbsent ? "text-red-500" : "text-green-700"} font-bold`}>
-                                      {student.isAbsent ? "غائب" : "حاضر"}
-                                    </span>
-                                    {savingIds.has(student.studentId ?? student.name) && <Loader2 className="animate-spin h-4 w-4 text-gray-400" />}
-                                  </div>
-                                </TableCell>
-                                  <TableCell className="text-right">
-                                  <div className="flex flex-col items-end">
-                                    <span>{student.name}</span>
-                                  </div>
-                                </TableCell>
-                                <TableCell className="text-right hidden sm:table-cell"> 
-                                  <div className="hidden sm:flex items-center justify-end gap-2">
-                                    <span>{student.rollNumber ?? index + 1}</span>
-                                  </div>
-                                </TableCell>
-                              </TableRow>
-                            );
+                                <StudentRow
+                                  key={idKey}
+                                  student={student}
+                                  index={index}
+                                  onDelete={(s) => { setDeleteTarget(s); setDeleteDialogOpen(true); }}
+                                  onToggle={handleToggle}
+                                  onToggleExcusedLocal={handleToggleExcusedAndSave}
+                                  saving={savingIds.has(String(student.studentId ?? student.name))}
+                                />
+                              );
                           })}
                         </TableBody>
                       </Table>

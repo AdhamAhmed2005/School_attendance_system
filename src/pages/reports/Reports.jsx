@@ -7,14 +7,26 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useReportsContext } from "@/contexts/ReportsContext";
+import { useAttendance } from "@/contexts/AttendanceContext";
+import { useStudent } from "@/contexts/StudentContext";
+import { UserCheck, UserX, Calendar as LucideCalendar, Clock as LucideClock } from "lucide-react";
 import { useClass } from "@/contexts/ClassContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 
 function Reports() {
   const { reports, fetchReports, fetchReportById, exportReports, loading } = useReportsContext();
   const { addReport } = useReportsContext();
+  const { fetchAttendance } = useAttendance();
+  const { fetchStudents } = useStudent();
   const { classes } = useClass();
   const [filterClass, setFilterClass] = useState(null);
+  const [statsPeriodType, setStatsPeriodType] = useState('monthly'); // 'monthly' | 'quarterly'
+  const [statsMonth, setStatsMonth] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; // YYYY-MM
+  });
+  const [attendanceStats, setAttendanceStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(false);
   const [reportTypeFilter, setReportTypeFilter] = useState(null);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -30,6 +42,112 @@ function Reports() {
   useEffect(() => {
     fetchReports();
   }, [fetchReports]);
+
+  // compute attendance stats when class or period changes
+  useEffect(() => {
+    const compute = async () => {
+      if (!filterClass) {
+        setAttendanceStats(null);
+        return;
+      }
+      try {
+        setStatsLoading(true);
+        // fetch roster
+        const students = await fetchStudents(Number(filterClass));
+        const roster = Array.isArray(students) ? students : students ? [students] : [];
+
+        // helper to fetch attendance for a month key 'YYYY-MM'
+        const fetchForMonth = async (monthKey) => {
+          try {
+            const data = await fetchAttendance(Number(filterClass), monthKey);
+            return Array.isArray(data) ? data : data ? [data] : [];
+          } catch (e) {
+            return [];
+          }
+        };
+
+        const [year, mon] = (statsMonth || '').split('-').map((s) => Number(s));
+        const monthKey = statsMonth; // YYYY-MM
+
+        // monthly attendance
+        const monthRecords = await fetchForMonth(monthKey);
+
+        // quarterly: take month and previous two months
+        const quarterMonths = [];
+        if (statsPeriodType === 'quarterly') {
+          for (let i = 0; i < 3; i++) {
+            const m = mon - i;
+            let y = year;
+            let mm = m;
+            if (m <= 0) {
+              mm = 12 + m;
+              y = year - 1;
+            }
+            quarterMonths.push(`${y}-${String(mm).padStart(2, '0')}`);
+          }
+        } else {
+          quarterMonths.push(monthKey);
+        }
+
+        // fetch quarter months attendance in parallel
+        const quarterPromises = quarterMonths.map((mk) => fetchForMonth(mk));
+        const quarterResults = await Promise.all(quarterPromises);
+        const quarterRecords = quarterResults.flat();
+
+        // build absence counts per student in month and quarter
+        const absenceCountMonth = new Map();
+        const absenceCountQuarter = new Map();
+
+        const accumulate = (recList, map) => {
+          for (const r of recList) {
+            try {
+              const sid = r.studentId ?? (r.student && r.student.id) ?? null;
+              const name = (r.name ?? (r.student && r.student.name) ?? '').trim();
+              const key = sid != null ? String(sid) : `name:${name}`;
+              if (r.isAbsent || r.isAbsent === true) {
+                map.set(key, (map.get(key) || 0) + 1);
+              }
+            } catch (e) {
+              // ignore malformed record
+            }
+          }
+        };
+
+        accumulate(monthRecords, absenceCountMonth);
+        accumulate(quarterRecords, absenceCountQuarter);
+
+        // compute metrics
+        const count3 = roster.filter((s) => {
+          const key = s.id != null ? String(s.id) : `name:${(s.name||'').trim()}`;
+          return (absenceCountMonth.get(key) || 0) >= 3;
+        }).length;
+
+        const count5 = roster.filter((s) => {
+          const key = s.id != null ? String(s.id) : `name:${(s.name||'').trim()}`;
+          return (absenceCountMonth.get(key) || 0) >= 5;
+        }).length;
+
+        const count10 = roster.filter((s) => {
+          const key = s.id != null ? String(s.id) : `name:${(s.name||'').trim()}`;
+          return (absenceCountQuarter.get(key) || 0) >= 10;
+        }).length;
+
+        const regularStudents = roster.filter((s) => {
+          const key = s.id != null ? String(s.id) : `name:${(s.name||'').trim()}`;
+          return (absenceCountQuarter.get(key) || 0) === 0;
+        }).map((s) => ({ id: s.id, name: s.name }));
+
+        setAttendanceStats({ count3, count5, count10, regularStudents, rosterLength: roster.length });
+      } catch (err) {
+        console.error('Failed to compute attendance stats', err);
+        setAttendanceStats(null);
+      }
+      finally {
+        setStatsLoading(false);
+      }
+    };
+    compute();
+  }, [filterClass, statsMonth, statsPeriodType, fetchAttendance, fetchStudents]);
 
   const filtered = useMemo(() => {
     const list = Array.isArray(reports) ? reports.slice() : [];
@@ -239,6 +357,57 @@ function Reports() {
             <div className="flex flex-col items-end">
               <Label className="text-right m-2">إلى</Label>
               <Input type="date" value={toDate} onChange={(e) => { setToDate(e.target.value); setPage(1); }} />
+            </div>
+          </div>
+
+          {/* Attendance stats panel */}
+          <div className="border rounded p-4 mb-4 bg-white">
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-semibold">غياب و انتظام</div>
+              <div className="flex items-center gap-2">
+                <Select value={statsPeriodType} onValueChange={(v) => setStatsPeriodType(v)}>
+                  <SelectTrigger className="md:min-w-[10rem] w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="monthly">شهري</SelectItem>
+                    <SelectItem value="quarterly">فصلي</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input type="month" value={statsMonth} onChange={(e) => setStatsMonth(e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div className="p-3 border rounded text-center flex flex-col items-center justify-center">
+                <div className="mb-2 text-gray-500"><UserX className="w-6 h-6 text-red-500 inline-block" /></div>
+                <div className="text-sm text-gray-600">غياب 3 أيام (شهري)</div>
+                <div className="text-2xl font-bold">{statsLoading ? <span className="inline-block animate-spin">⏳</span> : (attendanceStats ? attendanceStats.count3 : '-')}</div>
+              </div>
+              <div className="p-3 border rounded text-center flex flex-col items-center justify-center">
+                <div className="mb-2 text-gray-500"><UserX className="w-6 h-6 text-orange-500 inline-block" /></div>
+                <div className="text-sm text-gray-600">غياب 5 أيام (شهري)</div>
+                <div className="text-2xl font-bold">{statsLoading ? <span className="inline-block animate-spin">⏳</span> : (attendanceStats ? attendanceStats.count5 : '-')}</div>
+              </div>
+              <div className="p-3 border rounded text-center flex flex-col items-center justify-center">
+                <div className="mb-2 text-gray-500"><LucideCalendar className="w-6 h-6 text-indigo-500 inline-block" /></div>
+                <div className="text-sm text-gray-600">غياب 10 أيام (فصلي)</div>
+                <div className="text-2xl font-bold">{statsLoading ? <span className="inline-block animate-spin">⏳</span> : (attendanceStats ? attendanceStats.count10 : '-')}</div>
+              </div>
+              <div className="p-3 border rounded">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-gray-600">الطالبات المنتظمات ({attendanceStats ? attendanceStats.regularStudents.length : '-'})</div>
+                  <div className="text-gray-500"><UserCheck className="w-5 h-5 text-green-500" /></div>
+                </div>
+                <div className="mt-2 max-h-36 overflow-auto">
+                  {statsLoading ? <div className="text-sm text-gray-500">جارٍ التحميل...</div> : (
+                    attendanceStats ? (
+                      attendanceStats.regularStudents.length === 0 ? <div className="text-sm text-gray-500">لا توجد</div> : (
+                        <ul className="text-sm">
+                          {attendanceStats.regularStudents.map((s) => <li key={s.id || s.name}>{s.name}</li>)}
+                        </ul>
+                      )
+                    ) : <div className="text-sm text-gray-500">لا توجد بيانات</div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
 
