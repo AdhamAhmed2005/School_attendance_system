@@ -210,27 +210,116 @@ function Controls() {
           const workbook = XLSX.read(data, { type: 'array' });
           const sheetName = workbook.SheetNames[0];
           const sheet = workbook.Sheets[sheetName];
-          const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }); // array of arrays
-          if (!rows || rows.length === 0) {
+          // Prefer object parsing so headers are keys; this allows matching header exactly like 'اسم الطالبة'
+          const objRows = XLSX.utils.sheet_to_json(sheet, { defval: '' }); // array of objects keyed by header
+          if (!objRows || objRows.length === 0) {
             toast.error('الملف لا يحتوي على بيانات');
             return;
           }
 
-          // Detect header row: look for a column that matches 'name' or Arabic equivalents
-          const headerRow = rows[0].map((c) => (c === null || c === undefined ? '' : String(c).trim()));
-          let nameCol = 0;
-          const headerIdx = headerRow.findIndex((h) => /(^name$|الاسم|اسم)/i.test(h));
-          const hasHeader = headerIdx !== -1;
-          if (hasHeader) nameCol = headerIdx;
+          const keys = Object.keys(objRows[0] || {});
+          const normalizeKey = (k) => (k === null || k === undefined ? '' : String(k).trim().replace(/\s+/g, '').toLowerCase());
 
-          const startIndex = hasHeader ? 1 : 0;
-          const extracted = [];
-          for (let i = startIndex; i < rows.length; i++) {
-            const row = rows[i];
-            if (!row) continue;
-            const cell = row[nameCol] ?? row[0] ?? '';
-            const val = (cell === null || cell === undefined) ? '' : String(cell).trim();
-            if (val) extracted.push(val);
+          // Exact key match candidates (after normalization)
+          const keyCandidates = keys.map((k) => ({ raw: k, norm: normalizeKey(k) }));
+          // Match exact patterns like 'name', 'الاسم', 'اسم', 'اسمالطالبة', 'اسمالطالب'
+          let found = keyCandidates.find((x) => /^(name|الاسم|اسم|اسمالطالبة|اسمالطالب)$/.test(x.norm));
+          // Fallback: any key containing 'name' or 'اسم'
+          if (!found) found = keyCandidates.find((x) => /(name|اسم)/i.test(x.raw));
+
+          let extracted = [];
+          if (found) {
+            const key = found.raw;
+            extracted = objRows.map((r) => (r && r[key] != null ? String(r[key]).trim() : '')).filter(Boolean);
+          } else {
+            // Fallback: analyze the sheet by columns and pick the column most likely to contain person names.
+            const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+            const rowCount = matrix.length;
+            const colCount = matrix.reduce((m, r) => Math.max(m, (r || []).length), 0);
+
+            // First try: scan entire sheet for an explicit header cell like 'اسم الطالبة' and extract below it
+            const normalizeCell = (c) => (c === null || c === undefined ? '' : String(c).trim().replace(/\s+/g, '').toLowerCase());
+            let headerFound = null;
+            for (let ri = 0; ri < matrix.length && !headerFound; ri++) {
+              const row = matrix[ri] || [];
+              for (let ci = 0; ci < row.length; ci++) {
+                const norm = normalizeCell(row[ci]);
+                if (/^(name|الاسم|اسم|اسمالطالبة|اسمالطالب)$/.test(norm) || /اسم/.test(norm)) {
+                  headerFound = { row: ri, col: ci };
+                  break;
+                }
+              }
+            }
+
+            if (headerFound) {
+              const vals = [];
+              for (let ri = headerFound.row + 1; ri < matrix.length; ri++) {
+                const cell = (matrix[ri] && matrix[ri][headerFound.col]) || '';
+                const v = cell == null ? '' : String(cell).trim();
+                if (v) vals.push(v);
+              }
+              extracted = vals.filter(Boolean);
+              if (extracted.length > 0) {
+                setBulkNames(extracted);
+                toast.success(`تم استيراد ${extracted.length} اسم${extracted.length > 1 ? 'ات' : ''}`);
+                return;
+              }
+              // otherwise fall back to heuristic
+            }
+
+            const nameCharRx = /[A-Za-z\u0600-\u06FF]/; // Latin or Arabic letters
+            const badPhrasesRx = /(ISBN|McGraw|Hill|We can|page|class|الفصل|منهج|كتاب|مادة|عام بنات)/i;
+
+            const scoreColumn = (ci) => {
+              let score = 0;
+              let validRows = 0;
+              for (let ri = 0; ri < rowCount; ri++) {
+                const cell = (matrix[ri] && matrix[ri][ci]) || '';
+                const v = cell == null ? '' : String(cell).trim();
+                if (!v) continue;
+                validRows += 1;
+                // letters present
+                if (nameCharRx.test(v)) score += 2;
+                // short-ish (names usually not extremely long)
+                const words = v.split(/\s+/).filter(Boolean).length;
+                if (words <= 4) score += 1;
+                if (v.length <= 60) score += 1;
+                // penalize numeric or obvious non-name phrases
+                if (/\d/.test(v)) score -= 2;
+                if (badPhrasesRx.test(v)) score -= 3;
+                // penalize if contains many punctuation characters (likely sentences)
+                const punctCount = (v.match(/[.,:;\-/()]/g) || []).length;
+                if (punctCount > 2) score -= 1;
+              }
+              // normalize by rows considered
+              return validRows > 0 ? score / validRows : -Infinity;
+            };
+
+            let bestIdx = -1;
+            let bestScore = -Infinity;
+            for (let ci = 0; ci < colCount; ci++) {
+              const s = scoreColumn(ci);
+              if (s > bestScore) {
+                bestScore = s;
+                bestIdx = ci;
+              }
+            }
+
+            if (bestIdx === -1 || bestScore === -Infinity) {
+              // nothing useful found
+              extracted = [];
+            } else {
+              // pick values from the chosen column; skip empty rows and potential header row if present
+              const vals = [];
+              // Determine if first row looks like header by checking keys presence in objRows (already false here)
+              for (let ri = 0; ri < matrix.length; ri++) {
+                const cell = (matrix[ri] && matrix[ri][bestIdx]) || '';
+                const v = cell == null ? '' : String(cell).trim();
+                if (v) vals.push(v);
+              }
+              extracted = vals.filter(Boolean);
+              console.warn('Controls.importFromFile: chose column', bestIdx, 'score', bestScore, 'sample:', extracted.slice(0,5));
+            }
           }
 
           if (extracted.length === 0) {
@@ -745,7 +834,7 @@ function Controls() {
             </CardHeader>
             <CardContent className="px-6">
               <div className="mb-4 flex gap-2">
-                <input type="file" accept=".txt,.csv" onChange={importFromFile} className="hidden" id="import-file" />
+                <input type="file" accept=".txt,.csv,.xlsx,.xls" onChange={importFromFile} className="hidden" id="import-file" />
                 <Button variant="outline" onClick={() => document.getElementById("import-file").click()}>
                   📁 استيراد من ملف
                 </Button>
