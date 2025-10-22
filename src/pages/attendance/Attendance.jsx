@@ -21,15 +21,8 @@ import {
 } from "@/components/ui/alert-dialog";
 
 // Memoized row to avoid full-table re-renders. Re-renders only when student props or saving state change.
-const StudentRow = memo(function StudentRow({ student, index, onDelete, onToggle, onToggleExcusedLocal, saving }) {
+const StudentRow = memo(function StudentRow({ student, index, onDelete, onToggle, onToggleExcused, saving }) {
   const idKey = student.studentId ?? `${student.name}-${index}`;
-  // DEBUG: trace per-row renders
-  try { console.debug(`[Render] StudentRow ${idKey} isAbsent=${!!student.isAbsent} isExcused=${!!student.isExcused} saving=${!!saving}`); } catch (e) {}
-  const [localExcused, setLocalExcused] = useState(!!student.isExcused);
-  // keep local state in sync if parent prop changes (e.g., after reload)
-  useEffect(() => {
-    setLocalExcused(!!student.isExcused);
-  }, [student.isExcused]);
   return (
     <TableRow key={idKey}>
       <TableCell className="text-center">
@@ -64,17 +57,13 @@ const StudentRow = memo(function StudentRow({ student, index, onDelete, onToggle
         <div className="flex items-center justify-center gap-2">
           <div className="flex items-center gap-2">
             <Switch
-              checked={localExcused}
-              onCheckedChange={(checked) => {
-                // update label locally without telling parent to re-render
-                setLocalExcused(!!checked);
-                onToggleExcusedLocal(student, checked);
-              }}
+              checked={!!student.isExcused}
+              onCheckedChange={(checked) => onToggleExcused(student, checked)}
               disabled={!!saving}
-              className={`${localExcused ? 'bg-yellow-100/90' : 'bg-gray-100/80'}`}
+              className={`${student.isExcused ? 'bg-yellow-100/90' : 'bg-gray-100/80'}`}
             />
-            <span className={`text-sm ${localExcused ? 'text-yellow-700 font-semibold' : 'text-gray-600'}`}>
-              {localExcused ? 'مع عذر' : 'بدون عذر'}
+            <span className={`text-sm ${student.isExcused ? 'text-yellow-700 font-semibold' : 'text-gray-600'}`}>
+              {student.isExcused ? 'مع عذر' : 'بدون عذر'}
             </span>
             {saving && <Loader2 className="animate-spin h-4 w-4 text-gray-400" />}
           </div>
@@ -113,9 +102,6 @@ function Attendance() {
   const [dirtyKeys, setDirtyKeys] = useState(new Set());
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
-
-  // DEBUG: trace Attendance parent render
-  try { console.debug(`[Render] Attendance parent - rows=${attendanceData.length} savingCount=${savingIds.size}`); } catch (e) {}
 
   const loadAttendance = useCallback(async () => {
     try {
@@ -255,7 +241,7 @@ function Attendance() {
       // Save single row using same sequential logic: create if missing, otherwise update
       const key = String(student.studentId ?? student.name ?? "unknown");
       setSavingIds((s) => new Set([...(Array.from(s) || []), key]));
-  if (!student.id) {
+      if (!student.id) {
         // Do not allow creating attendance rows by providing only a name — require a truthy studentId.
         if (!student.studentId || String(student.studentId).trim() === "0") {
           toast.error('لا يمكن حفظ طالبة بدون معرف صالح. أضف الطالبة أولاً عبر قائمة الطلاب.');
@@ -274,10 +260,9 @@ function Attendance() {
           if (createdRec && createdRec.id) {
             setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(student.studentId ?? student.name ?? "") ? { ...item, id: createdRec.id, isAbsent: !!createdRec.isAbsent } : item)));
           }
-          return createdRec;
         }
       } else {
-        const updated = await updateAttendance(student.id, {
+        await updateAttendance(student.id, {
           id: student.id,
           studentId: student.studentId,
           classId: selectedClass.id,
@@ -285,7 +270,6 @@ function Attendance() {
           isAbsent: !!student.isAbsent,
           isExcused: !!student.isExcused,
         });
-        return updated;
       }
       setSavingIds((s) => {
         const copy = new Set(s);
@@ -301,25 +285,21 @@ function Attendance() {
     } catch (err) {
       console.error('Error saving single attendance', err);
       toast.error('خطأ عند حفظ سجل واحد — تحقق من لوحة التصحيح');
-      return null;
     }
   };
 
   // Improved UX: when toggling excused, auto-save the single row with optimistic UI and per-row spinner
   const handleToggleExcusedAndSave = useCallback(async (student, checked) => {
     const key = String(student.studentId ?? student.name ?? "unknown");
-    // Do NOT update parent state immediately; row handles local label for snappy UX
+    // optimistically update UI
+    handleToggleExcused(student, checked);
 
     // mark saving for this row
     setSavingIds((s) => new Set([...(Array.from(s) || []), key]));
 
     try {
       // attempt to save single row; this will call add or update depending on presence of id
-      const saved = await handleSaveSingle({ ...student, isExcused: typeof checked === 'boolean' ? !!checked : !student.isExcused });
-      if (saved) {
-        // Merge only the saved student into attendanceData to avoid full re-renders
-        setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(saved.studentId ?? saved.student?.id ?? saved.id ?? '') ? { ...item, isExcused: typeof saved.isExcused === 'boolean' ? saved.isExcused : !!saved.excused, id: saved.id ?? item.id } : item)));
-      }
+      await handleSaveSingle({ ...student, isExcused: typeof checked === 'boolean' ? !!checked : !student.isExcused });
       toast.success('تم حفظ حالة العذر');
     } catch (err) {
       console.error('Failed to auto-save excused toggle', err);
@@ -520,7 +500,7 @@ function Attendance() {
                                   index={index}
                                   onDelete={(s) => { setDeleteTarget(s); setDeleteDialogOpen(true); }}
                                   onToggle={handleToggle}
-                                  onToggleExcusedLocal={handleToggleExcusedAndSave}
+                                  onToggleExcused={handleToggleExcusedAndSave}
                                   saving={savingIds.has(String(student.studentId ?? student.name))}
                                 />
                               );
