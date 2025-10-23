@@ -592,7 +592,7 @@ function Controls() {
                   {Array.isArray(classes) ? (
                     classes.map((cls, idx) => (
                       <SelectItem key={cls?.id ?? `cls-${idx}`} value={cls.id?.toString()} className="text-right justify-end">
-                        {cls.className} ({cls.studentCount} طالبة){cls.director ? ` - ${cls.director}` : ""}
+                        {`${cls.className}${cls.academicTerm ? ` · ${cls.academicTerm}` : ''}`}
                       </SelectItem>
                     ))
                   ) : (

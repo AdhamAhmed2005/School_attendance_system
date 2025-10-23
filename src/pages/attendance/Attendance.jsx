@@ -1,5 +1,4 @@
-import { useEffect, useState, useMemo, useCallback, memo } from "react";
-import axios from "axios";
+import { useEffect, useState, useCallback, memo } from "react";
 import { useAttendance } from "@/contexts/AttendanceContext";
 import { useStudent } from "@/contexts/StudentContext";
 import { useClass } from "@/contexts/ClassContext";
@@ -21,7 +20,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 // Memoized row to avoid full-table re-renders. Re-renders only when student props or saving state change.
-const StudentRow = memo(function StudentRow({ student, index, onDelete, onToggle, onToggleExcused, saving }) {
+const StudentRow = memo(function StudentRow({ student, index, onDelete, onToggle, saving }) {
   const idKey = student.studentId ?? `${student.name}-${index}`;
   return (
     <TableRow key={idKey}>
@@ -53,22 +52,7 @@ const StudentRow = memo(function StudentRow({ student, index, onDelete, onToggle
         </div>
       </TableCell>
 
-      <TableCell className="text-center">
-        <div className="flex items-center justify-center gap-2">
-          <div className="flex items-center gap-2">
-            <Switch
-              checked={!!student.isExcused}
-              onCheckedChange={(checked) => onToggleExcused(student, checked)}
-              disabled={!!saving}
-              className={`${student.isExcused ? 'bg-yellow-100/90' : 'bg-gray-100/80'}`}
-            />
-            <span className={`text-sm ${student.isExcused ? 'text-yellow-700 font-semibold' : 'text-gray-600'}`}>
-              {student.isExcused ? 'مع عذر' : 'بدون عذر'}
-            </span>
-            {saving && <Loader2 className="animate-spin h-4 w-4 text-gray-400" />}
-          </div>
-        </div>
-      </TableCell>
+      {/* Excused column removed as requested */}
 
       <TableCell className="text-right">
         <div className="flex flex-col items-end">
@@ -93,15 +77,19 @@ const StudentRow = memo(function StudentRow({ student, index, onDelete, onToggle
 });
 
 function Attendance() {
-  const { fetchClassAttendanceByDate, addAttendance, updateAttendance, loading, attendanceNotFound, lastErrorDetail, clearLastError, showDebugPanel, setShowDebugPanel } = useAttendance();
+  const { fetchClassAttendanceByDate, addAttendance, loading, attendanceNotFound } = useAttendance();
   const { selectedClass, selectedDate, updateClass, setSelectedClass } = useClass();
   const { fetchStudents, deleteStudent } = useStudent();
   const [attendanceData, setAttendanceData] = useState([]);
-  const [allPresent, setAllPresent] = useState(false);
+  // allPresent state removed (not used)
   const [savingIds, setSavingIds] = useState(new Set());
-  const [dirtyKeys, setDirtyKeys] = useState(new Set());
+  const [, setDirtyKeys] = useState(new Set());
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  // dialog state when marking a student absent: prompt whether absence has a reason (excused)
+  const [reasonDialogOpen, setReasonDialogOpen] = useState(false);
+  const [reasonTarget, setReasonTarget] = useState(null);
+  const [reasonExcused, setReasonExcused] = useState(false);
 
   const loadAttendance = useCallback(async () => {
     try {
@@ -129,7 +117,7 @@ function Attendance() {
           const mm = String(dt.getMonth() + 1).padStart(2, "0");
           const dd = String(dt.getDate()).padStart(2, "0");
           return `${yyyy}-${mm}-${dd}`;
-        } catch (e) {
+        } catch {
           return new Date(d).toISOString().slice(0, 10);
         }
       };
@@ -167,6 +155,7 @@ function Attendance() {
             name: s.name ?? s.fullName ?? s.studentName,
             rollNumber: s.rollNumber ?? s.roll ?? (idx + 1),
             isAbsent: !!(match && match.isAbsent),
+            isExcused: !!(match && (typeof match.isExcused === 'boolean' ? match.isExcused : !!match.excused)),
             id: match?.id,
           };
         });
@@ -176,12 +165,13 @@ function Attendance() {
         setAttendanceData(filteredMerged);
       } else {
         // no roster available; fall back to attendance items (may be partial)
-        const deduped = Array.from(new Map(normalized.map((n) => [n.studentId != null ? String(n.studentId) : n.name, n])).values()).map((n) => ({
-          studentId: n.studentId,
-          name: n.name,
-          rollNumber: n.rollNumber,
-          isAbsent: n.isAbsent,
-          id: n.id,
+  const deduped = Array.from(new Map(normalized.map((n) => [n.studentId != null ? String(n.studentId) : n.name, n])).values()).map((n) => ({
+    studentId: n.studentId,
+    name: n.name,
+    rollNumber: n.rollNumber,
+    isAbsent: n.isAbsent,
+    isExcused: typeof n.isExcused === 'boolean' ? n.isExcused : !!n.excused,
+    id: n.id,
   }));
         // filter out rows without a valid studentId
         const filteredDeduped = deduped.filter((p) => p.studentId != null && String(p.studentId).trim() !== "" && String(p.studentId).trim() !== "0");
@@ -205,10 +195,18 @@ function Attendance() {
     // determine new isAbsent value (checked=true means present)
     const newIsAbsent = typeof checked === "boolean" ? !checked : !student.isAbsent;
 
-    // Optimistically update the UI only
+    // If toggling to absent, prompt the user whether the absence has a reason (excused).
+    // We do not optimistically flip UI here because the Switch's checked prop is derived from state.
+    if (newIsAbsent) {
+      setReasonTarget(student);
+      setReasonExcused(!!student.isExcused);
+      setReasonDialogOpen(true);
+      return;
+    }
+
+    // toggling back to present: update UI and mark dirty so Save will persist later
     setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(student.studentId ?? student.name ?? "") ? { ...item, isAbsent: newIsAbsent } : item)));
 
-    // mark as dirty so Save will persist later
     setDirtyKeys((s) => {
       const copy = new Set(s);
       copy.add(key);
@@ -216,109 +214,34 @@ function Attendance() {
     });
   }, [setAttendanceData, setDirtyKeys]);
 
-  // Toggle excused state for a student (marks row dirty for saving)
-  const handleToggleExcused = (student, checked) => {
+  // Confirm reason dialog: save the absence state (+excused flag) for the targeted student
+  const handleReasonSave = useCallback(() => {
+    if (!reasonTarget) {
+      setReasonDialogOpen(false);
+      setReasonTarget(null);
+      return;
+    }
+    const student = reasonTarget;
     const key = String(student.studentId ?? student.name ?? "unknown");
-    const newIsExcused = typeof checked === "boolean" ? !!checked : !student.isExcused;
-
-    setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(student.studentId ?? student.name ?? "") ? { ...item, isExcused: newIsExcused } : item)));
-
+    setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(student.studentId ?? student.name ?? "") ? { ...item, isAbsent: true, isExcused: !!reasonExcused } : item)));
     setDirtyKeys((s) => {
       const copy = new Set(s);
       copy.add(key);
       return copy;
     });
-  };
+    setReasonDialogOpen(false);
+    setReasonTarget(null);
+  }, [reasonTarget, reasonExcused]);
 
-  // Save a single student's attendance (useful for debugging server-side batch issues)
-  const handleSaveSingle = async (student) => {
-    try {
-      if (!selectedClass?.id) {
-        toast.error("الرجاء اختيار فصل دراسي أولاً");
-        return;
-      }
-      const isoDate = selectedDate.toISOString();
-      // Save single row using same sequential logic: create if missing, otherwise update
-      const key = String(student.studentId ?? student.name ?? "unknown");
-      setSavingIds((s) => new Set([...(Array.from(s) || []), key]));
-      if (!student.id) {
-        // Do not allow creating attendance rows by providing only a name — require a truthy studentId.
-        if (!student.studentId || String(student.studentId).trim() === "0") {
-          toast.error('لا يمكن حفظ طالبة بدون معرف صالح. أضف الطالبة أولاً عبر قائمة الطلاب.');
-        } else {
-          const payload = [{
-            studentId: student.studentId,
-            classId: selectedClass.id,
-            date: isoDate,
-            isAbsent: !!student.isAbsent,
-            isExcused: !!student.isExcused,
-          }];
-          const created = await addAttendance(payload);
-          let createdRec = null;
-          if (Array.isArray(created) && created.length > 0) createdRec = created[0];
-          else if (created && typeof created === "object") createdRec = created;
-          if (createdRec && createdRec.id) {
-            setAttendanceData((prev) => prev.map((item) => (String(item.studentId ?? item.name ?? "") === String(student.studentId ?? student.name ?? "") ? { ...item, id: createdRec.id, isAbsent: !!createdRec.isAbsent } : item)));
-          }
-        }
-      } else {
-        await updateAttendance(student.id, {
-          id: student.id,
-          studentId: student.studentId,
-          classId: selectedClass.id,
-          date: isoDate,
-          isAbsent: !!student.isAbsent,
-          isExcused: !!student.isExcused,
-        });
-      }
-      setSavingIds((s) => {
-        const copy = new Set(s);
-        copy.delete(key);
-        return copy;
-      });
-      setDirtyKeys((s) => {
-        const copy = new Set(s);
-        copy.delete(key);
-        return copy;
-      });
-      toast.success(`تم حفظ حالة ${student.name || student.studentId}`);
-    } catch (err) {
-      console.error('Error saving single attendance', err);
-      toast.error('خطأ عند حفظ سجل واحد — تحقق من لوحة التصحيح');
-    }
-  };
+  const handleReasonCancel = useCallback(() => {
+    // just close the dialog and leave the student's state unchanged
+    setReasonDialogOpen(false);
+    setReasonTarget(null);
+  }, []);
 
-  // Improved UX: when toggling excused, auto-save the single row with optimistic UI and per-row spinner
-  const handleToggleExcusedAndSave = useCallback(async (student, checked) => {
-    const key = String(student.studentId ?? student.name ?? "unknown");
-    // optimistically update UI
-    handleToggleExcused(student, checked);
+  // Per-row excused handlers removed when excused column was removed from the table
 
-    // mark saving for this row
-    setSavingIds((s) => new Set([...(Array.from(s) || []), key]));
-
-    try {
-      // attempt to save single row; this will call add or update depending on presence of id
-      await handleSaveSingle({ ...student, isExcused: typeof checked === 'boolean' ? !!checked : !student.isExcused });
-      toast.success('تم حفظ حالة العذر');
-    } catch (err) {
-      console.error('Failed to auto-save excused toggle', err);
-      toast.error('فشل حفظ حالة العذر');
-      // on error, revert the optimistic change by reloading attendance
-      await loadAttendance();
-    } finally {
-      setSavingIds((s) => {
-        const copy = new Set(s);
-        copy.delete(key);
-        return copy;
-      });
-      setDirtyKeys((s) => {
-        const copy = new Set(s);
-        copy.delete(key);
-        return copy;
-      });
-    }
-  }, [handleToggleExcused, handleSaveSingle, loadAttendance]);
+  // Excused per-row auto-save removed because excused column was removed from the table
 
   const handleSave = async () => {
     // Save all rows as a single batch array via addAttendance
@@ -330,23 +253,17 @@ function Attendance() {
     const isoDate = selectedDate.toISOString();
     const rows = Array.isArray(attendanceData) ? attendanceData : [];
 
-    // Build payload: include only rows that are dirty (or all rows if nothing marked)
-    const rawPayloadRows = (dirtyKeys.size > 0
-      ? rows.filter((row, i) => dirtyKeys.has(String(row.studentId ?? row.name ?? i)))
-      : rows
-    ).map((r) => {
-      const obj = {
+    // Build payload: send all rows at once (filtered to valid studentId). This ensures the
+    // backend receives a single array containing each student's attendance state as requested.
+    const rawPayloadRows = rows.map((r) => {
+      return {
+        id: typeof r.id !== 'undefined' && r.id !== null ? r.id : 0,
         studentId: r.studentId,
         classId: selectedClass.id,
         date: isoDate,
         isAbsent: !!r.isAbsent,
         isExcused: !!r.isExcused,
       };
-      // include id only when present (don't hard-code 0)
-  // include id only when present and a valid non-zero value
-  if (typeof r.id !== "undefined" && r.id !== null && String(r.id).trim() !== "0") obj.id = r.id;
-      // Do NOT include `name` here to avoid implicitly creating students on the server.
-      return obj;
     });
 
     const payloadRows = rawPayloadRows
@@ -366,7 +283,20 @@ function Attendance() {
     try {
       // Show a single saving indicator by temporarily setting savingIds to 'all'
       setSavingIds(new Set(["__ALL__"]));
+      // diagnostic: record outgoing payload for debugging
+      try {
+        if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+        window.__attendanceLastRequests.unshift({ ts: Date.now(), phase: 'OUTGOING_BATCH_SAVE', payload: payloadRows });
+        if (window.__attendanceLastRequests.length > 200) window.__attendanceLastRequests.length = 200;
+  } catch (logErr) { console.warn('diag push failed', logErr); }
       const res = await addAttendance(payloadRows);
+
+      // diagnostic: record server response when available
+      try {
+        if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+        window.__attendanceLastRequests.unshift({ ts: Date.now(), phase: 'BATCH_SAVE_RESPONSE', response: res });
+        if (window.__attendanceLastRequests.length > 200) window.__attendanceLastRequests.length = 200;
+  } catch (logErr) { console.warn('diag push failed', logErr); }
 
       // If some rows were skipped because they lacked studentId, inform the user
       if (skipped.length > 0) {
@@ -385,12 +315,14 @@ function Attendance() {
               map.set(key, {
                 studentId: u.studentId ?? existing.studentId,
                 name: existing.name ?? u.name ?? existing.name,
+
+
                 rollNumber: existing.rollNumber ?? u.rollNumber,
                 isAbsent: typeof u.isAbsent === "boolean" ? u.isAbsent : !!u.absent,
                 isExcused: typeof u.isExcused === "boolean" ? u.isExcused : !!u.excused,
                 id: u.id ?? existing.id,
               });
-            } catch (e) {
+            } catch {
               // ignore merge errors for a single record
             }
           }
@@ -416,7 +348,6 @@ function Attendance() {
   
   const handleToggleAll = (present) => {
     setAttendanceData((prev) => prev.map((p) => ({ ...p, isAbsent: !present })));
-    setAllPresent(present);
   };
   
   const handleExportCSV = () => {
@@ -482,7 +413,7 @@ function Attendance() {
                             {/* Delete column on the left side */}
                             <TableHead className="text-center">حذف</TableHead>
                             <TableHead className="text-center">الحضور</TableHead>
-                            <TableHead className="text-center">عذر</TableHead>
+                            {/* Excused column removed */}
                             <TableHead className="text-right">اسم الطالب</TableHead>
                             {/* hide roll number on very small screens to avoid cramped layout */}
                             <TableHead className="text-right hidden sm:table-cell">رقم الطالب</TableHead>
@@ -500,7 +431,6 @@ function Attendance() {
                                   index={index}
                                   onDelete={(s) => { setDeleteTarget(s); setDeleteDialogOpen(true); }}
                                   onToggle={handleToggle}
-                                  onToggleExcused={handleToggleExcusedAndSave}
                                   saving={savingIds.has(String(student.studentId ?? student.name))}
                                 />
                               );
@@ -560,7 +490,7 @@ function Attendance() {
                       if (selectedClass && typeof selectedClass.studentCount !== 'undefined') {
                         const current = Number(selectedClass.studentCount) || 0;
                         const updated = Math.max(0, current - 1);
-                        try { await updateClass(selectedClass.id, { ...selectedClass, studentCount: updated }); } catch (e) {}
+                        try { await updateClass(selectedClass.id, { ...selectedClass, studentCount: updated }); } catch (err) { console.warn('updateClass failed while adjusting studentCount', err); }
                         setSelectedClass((prev) => (prev ? { ...prev, studentCount: updated } : prev));
                       }
                       toast.success("تم حذف الطالبة");
@@ -581,6 +511,37 @@ function Attendance() {
                 >
                   حذف نهائي
                 </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+          {/* Reason / Excused dialog when marking absent */}
+          <AlertDialog open={reasonDialogOpen} onOpenChange={(v) => { if (!v) setReasonTarget(null); setReasonDialogOpen(v); }}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  تسجيل غياب
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  {reasonTarget ? `${reasonTarget.name} سيتم تسجيل غياب للطالب/ـة` : 'سيتم تسجيل غياب للطالب'}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <div className="flex flex-col gap-3 w-full">
+                  <div className="flex items-center justify-between">
+                    <div className="text-right">
+                      <div className="font-medium">هل يوجد سبب للغياب؟</div>
+                      <div className="text-sm text-gray-500">اختر إن كان الغياب بعذر (مع عذر) أو بدون عذر ثم اضغط حفظ</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Switch checked={!!reasonExcused} onCheckedChange={(v) => setReasonExcused(!!v)} />
+                    <span className="text-sm">{reasonExcused ? 'مع عذر' : 'بدون عذر'}</span>
+                  </div>
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <AlertDialogCancel onClick={handleReasonCancel}>إلغاء</AlertDialogCancel>
+                  <AlertDialogAction onClick={handleReasonSave}>حفظ</AlertDialogAction>
+                </div>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>

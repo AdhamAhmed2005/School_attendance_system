@@ -10,11 +10,11 @@ const toDateKey = (d) => {
     const mm = String(dt.getMonth() + 1).padStart(2, "0");
     const dd = String(dt.getDate()).padStart(2, "0");
     return `${yyyy}-${mm}-${dd}`;
-  } catch (e) {
+  } catch {
     // Fallback to ISO slice if something unexpected is passed
     try {
-      return new Date(d).toISOString().slice(0, 10);
-    } catch (e2) {
+        return new Date(d).toISOString().slice(0, 10); 
+    } catch {
       return new Date().toISOString().slice(0, 10);
     }
   }
@@ -38,7 +38,29 @@ export const AttendanceProvider = ({ children }) => {
 
       const params = {};
       if (classId) params.classId = classId;
-      if (month) params.month = month;
+      // Backend expects numeric month (1-12) and optional year as separate query params.
+      // Accept either:
+      // - a string 'YYYY-MM' (from <input type="month">), or
+      // - an object { year, month } or
+      // - a numeric/string month value (1-12)
+      if (month) {
+        if (typeof month === 'string' && /^\d{4}-\d{2}$/.test(month)) {
+          // If callers pass YYYY-MM (from <input type="month">) send only numeric month (1-12)
+          // because backend expects ?month=10 (no year) for class-scoped queries.
+          const [, m] = month.split('-').map((s) => Number(s));
+          if (!Number.isNaN(m)) {
+            params.month = m;
+          } else {
+            params.month = month;
+          }
+        } else if (typeof month === 'object' && month !== null && (month.month || month.year)) {
+          // if object provided, prefer month.month if present
+          if (month.month) params.month = month.month;
+          else if (month.year) params.month = month.year; // fallback (rare)
+        } else {
+          params.month = month;
+        }
+      }
 
       const response = await axios.get(url, { params });
       const data = response?.data;
@@ -112,10 +134,18 @@ export const AttendanceProvider = ({ children }) => {
       // If backend returns 404 for some classes/dates, set a flag so the UI can show an inline notice
       try {
         if (axios.isAxiosError && axios.isAxiosError(err) && err.response && err.response.status === 404) {
-          console.warn(
-            "AttendanceContext.fetchClassAttendanceByDate: 404 - no attendance for class/date",
-            { classId, date }
-          );
+          try {
+            console.warn(
+              "AttendanceContext.fetchClassAttendanceByDate: 404 - no attendance for class/date",
+              { classId, date, status: err.response.status, response: err.response.data }
+            );
+            if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+            window.__attendanceLastRequests.unshift({ ts: Date.now(), method: 'GET', url: '/Attendance/class-attendance-by-date', params: { classId, date }, status: err.response.status, response: err.response.data });
+            if (window.__attendanceLastRequests.length > 200) window.__attendanceLastRequests.length = 200;
+          } catch (logErr) {
+            console.warn('Failed to write diagnostic for 404 fetch', logErr);
+          }
+          
           // Try to initialize attendance rows automatically when server reports 404
           try {
             if (classId) {
@@ -160,6 +190,7 @@ export const AttendanceProvider = ({ children }) => {
         if (window.__attendanceLastRequests.length > 100) window.__attendanceLastRequests.length = 100;
       } catch (e) {
         // ignore logging failures
+        console.warn('logReq failed', e);
       }
     };
 
@@ -191,18 +222,20 @@ export const AttendanceProvider = ({ children }) => {
       const toCreate = [];
 
       // For each class/date group, fetch server attendance for that date to determine existing ids
-      for (const [groupKey, group] of groups.entries()) {
+      for (const [, group] of groups.entries()) {
         const { classId, date, items } = group;
         let serverRecords = [];
         try {
           const resp = await axios.get("/Attendance/class-attendance-by-date", { params: { classId, date } });
           serverRecords = Array.isArray(resp.data) ? resp.data : resp.data ? [resp.data] : [];
-        } catch (fetchErr) {
+        } catch {
           // If fetching fails, fall back to local state as best-effort
+          // Log the fetch error for diagnostics
+          try { console.warn('fetchClassAttendanceByDate: fetch failed'); } catch (e) { console.warn('failed logging fetchErr', e); }
           serverRecords = attendanceRecords.filter((rec) => {
             try {
               return rec.classId === classId && toDateKey(rec.date) === date;
-            } catch (e) {
+            } catch {
               return false;
             }
           });
@@ -221,12 +254,18 @@ export const AttendanceProvider = ({ children }) => {
         // Build a full update payload for this class/date: include every server record, merging incoming changes
         for (const sr of serverRecords) {
           try {
-            const sidKey = sr.studentId != null ? String(sr.studentId) : null;
             const nm = (sr.name ?? sr.student?.name ?? "").trim();
             // find incoming change for this student if provided
             const incoming = items.find((it) => (it.studentId != null && String(it.studentId) === String(sr.studentId)) || (it.name && String(it.name).trim() === nm));
-            toUpdate.push({ id: sr.id, studentId: sr.studentId, classId: sr.classId ?? classId, date: toDateKey(sr.date ?? date), isAbsent: incoming ? !!incoming.isAbsent : !!sr.isAbsent });
-          } catch (e) {
+            toUpdate.push({
+              id: sr.id,
+              studentId: sr.studentId,
+              classId: sr.classId ?? classId,
+              date: toDateKey(sr.date ?? date),
+              isAbsent: incoming ? !!incoming.isAbsent : !!sr.isAbsent,
+              isExcused: incoming ? !!incoming.isExcused : (typeof sr.isExcused === 'boolean' ? sr.isExcused : !!sr.excused),
+            });
+          } catch {
             // ignore malformed server record
           }
         }
@@ -247,77 +286,140 @@ export const AttendanceProvider = ({ children }) => {
               // skip
               continue;
             }
-            toCreate.push({ studentId: r.studentId, classId: r.classId, date: toDateKey(r.date), isAbsent: !!r.isAbsent });
+            toCreate.push({
+              studentId: r.studentId,
+              classId: r.classId,
+              date: toDateKey(r.date),
+              isAbsent: !!r.isAbsent,
+              isExcused: !!r.isExcused,
+            });
           }
         }
       }
 
       const results = [];
 
-      // First, update existing records one-by-one to avoid any server-side batch replace behavior
+      // First, update existing records in parallel to reduce total latency
       if (toUpdate.length > 0) {
-        for (const upd of toUpdate) {
+        const updatePromises = toUpdate.map((upd) => {
           // skip invalid ids such as 0 or falsy
           if (!upd.id || String(upd.id).trim() === "0") {
-            if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
-            window.__attendanceLastRequests.unshift({ ts: Date.now(), skippedUpdate: true, reason: 'invalid-id', payload: upd });
-            continue;
+            try {
+              if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+              window.__attendanceLastRequests.unshift({ ts: Date.now(), skippedUpdate: true, reason: 'invalid-id', payload: upd });
+            } catch (e) {
+              // eslint-disable-next-line no-console
+              console.warn('failed to write skippedUpdate diagnostic', e);
+            }
+            return Promise.resolve({ skipped: true, payload: upd });
           }
           try {
             logReq({ method: 'PUT', url: `/Attendance/${encodeURIComponent(upd.id)}`, payload: upd });
-            const resp = await axios.put(`/Attendance/${encodeURIComponent(upd.id)}`, upd);
-            const returned = resp?.data;
-            logReq({ method: 'PUT:response', url: `/Attendance/${encodeURIComponent(upd.id)}`, response: returned });
-            if (returned) {
-              // merge single returned updated record
-              setAttendanceRecords((prev) => {
-                const map = new Map(prev.map((r) => [r.id, r]));
-                const single = Array.isArray(returned) ? returned[0] : returned;
-                if (single && single.id) map.set(single.id, single);
-                return Array.from(map.values());
-              });
-              const single = Array.isArray(returned) ? returned[0] : returned;
-              if (single) results.push(single);
-            }
-          } catch (itemErr) {
-            const axiosJson = typeof itemErr?.toJSON === "function" ? itemErr.toJSON() : undefined;
-            const detail = { phase: "addAttendance-update-one", id: upd.id, payload: upd, axiosError: axiosJson, config: itemErr?.config, status: itemErr?.response?.status, response: itemErr?.response?.data, message: itemErr?.message };
-            setLastErrorDetail((d) => ({ ...(d || {}), ...(detail || {}) }));
-            setShowDebugPanel(true);
-            console.error("Error updating attendance for id", upd.id, detail);
+          } catch (e) {
+            console.warn('logReq PUT failed', e);
           }
+          return axios.put(`/Attendance/${encodeURIComponent(upd.id)}`, upd)
+            .then((resp) => ({ ok: true, returned: resp?.data, id: upd.id }))
+            .catch((err) => ({ ok: false, err, payload: upd }));
+        });
+
+        const updateResults = await Promise.all(updatePromises);
+        const successfulUpdates = [];
+        for (const ur of updateResults) {
+          if (ur && ur.ok && ur.returned) {
+            const single = Array.isArray(ur.returned) ? ur.returned[0] : ur.returned;
+            if (single) successfulUpdates.push(single);
+            try { logReq({ method: 'PUT:response', url: `/Attendance/${encodeURIComponent(ur.id)}`, response: ur.returned }); } catch (e) { console.warn('logReq PUT:response failed', e); }
+          } else if (ur && !ur.ok) {
+            try {
+              const itemErr = ur.err;
+              const axiosJson = typeof itemErr?.toJSON === "function" ? itemErr.toJSON() : undefined;
+              const detail = { phase: "addAttendance-update-one", id: ur.payload?.id, payload: ur.payload, axiosError: axiosJson, config: itemErr?.config, status: itemErr?.response?.status, response: itemErr?.response?.data, message: itemErr?.message };
+              setLastErrorDetail((d) => ({ ...(d || {}), ...(detail || {}) }));
+              setShowDebugPanel(true);
+              console.error("Error updating attendance for id", ur.payload?.id, detail);
+              try { if (!window.__attendanceLastRequests) window.__attendanceLastRequests = []; window.__attendanceLastRequests.unshift({ ts: Date.now(), method: 'PUT', payload: ur.payload, error: detail }); } catch (e) { console.warn('failed writing PUT error diagnostic', e); }
+            } catch (e) {
+              console.error('Error handling update failure', e);
+            }
+          }
+        }
+
+        if (successfulUpdates.length > 0) {
+          setAttendanceRecords((prev) => {
+            const map = new Map(prev.map((r) => [r.id, r]));
+            for (const single of successfulUpdates) {
+              if (single && single.id) map.set(single.id, single);
+            }
+            return Array.from(map.values());
+          });
+          results.push(...successfulUpdates);
         }
       }
 
       // Then, create missing records one-by-one (backend expects single object POST)
       if (toCreate.length > 0) {
-        for (const c of toCreate) {
-          try {
-            // guard: ensure studentId is valid (non-falsy, not '0') before calling POST
-            if (!c.studentId || String(c.studentId).trim() === "0") {
-              logReq({ method: 'POST-skipped', url: '/Attendance', reason: 'invalid-studentId', payload: c });
-              setLastErrorDetail((d) => ({ ...(d || {}), phase: 'addAttendance-invalid-studentId', payload: c }));
-              setShowDebugPanel(true);
-              continue;
-            }
-            logReq({ method: 'POST', url: '/Attendance', payload: c });
-            const r = await axios.post("/Attendance", c);
-            const returned = r?.data;
-            logReq({ method: 'POST:response', url: '/Attendance', response: returned });
-            if (returned) {
-              const single = Array.isArray(returned) ? returned[0] : returned;
-              // merge single into state
-              setAttendanceRecords((prev) => {
-                const map = new Map(prev.map((rec) => [rec.id, rec]));
-                if (single && single.id) map.set(single.id, single);
-                return Array.from(map.values());
-              });
-              results.push(single);
-            }
-          } catch (postErr) {
-            console.warn("addAttendance: POST failed for create", postErr?.message || postErr);
-            setLastErrorDetail((d) => ({ ...(d || {}), phase: "addAttendance-create", payload: c, message: postErr?.message, response: postErr?.response?.data }));
+        const createPromises = toCreate.map((c) => {
+          // guard: ensure studentId is valid (non-falsy, not '0') before calling POST
+          if (!c.studentId || String(c.studentId).trim() === "0") {
+            try { logReq({ method: 'POST-skipped', url: '/Attendance', reason: 'invalid-studentId', payload: c }); } catch { console.warn('logReq POST-skipped failed'); }
+            setLastErrorDetail((d) => ({ ...(d || {}), phase: 'addAttendance-invalid-studentId', payload: c }));
+            setShowDebugPanel(true);
+            return Promise.resolve({ skipped: true, payload: c });
           }
+          try { logReq({ method: 'POST', url: '/Attendance', payload: c }); } catch { console.warn('logReq POST failed'); }
+          return axios.post('/Attendance', c)
+            .then((r) => ({ ok: true, returned: r?.data }))
+            .catch((postErr) => ({ ok: false, err: postErr, payload: c }));
+        });
+
+        const createResults = await Promise.all(createPromises);
+        const successfulCreates = [];
+        for (const cr of createResults) {
+            if (cr && cr.ok && cr.returned) {
+            const single = Array.isArray(cr.returned) ? cr.returned[0] : cr.returned;
+            if (single) successfulCreates.push(single);
+            try { logReq({ method: 'POST:response', url: '/Attendance', response: cr.returned }); } catch { console.warn('logReq POST:response failed'); }
+          } else if (cr && !cr.ok) {
+            try {
+              const postErr = cr.err;
+              const resp = postErr?.response;
+              console.error("addAttendance: POST failed for create", {
+                message: postErr?.message,
+                status: resp?.status,
+                responseData: resp?.data,
+                url: '/Attendance',
+                payload: cr.payload,
+                config: postErr?.config,
+              });
+              if (!window.__attendanceLastRequests) window.__attendanceLastRequests = [];
+              window.__attendanceLastRequests.unshift({
+                ts: Date.now(),
+                method: 'POST',
+                url: '/Attendance',
+                payload: cr.payload,
+                errorMessage: postErr?.message,
+                status: resp?.status,
+                response: resp?.data,
+                config: postErr?.config,
+              });
+              if (window.__attendanceLastRequests.length > 200) window.__attendanceLastRequests.length = 200;
+            } catch {
+              console.error('Failed writing attendance POST diagnostic');
+            }
+            setLastErrorDetail((d) => ({ ...(d || {}), phase: "addAttendance-create", payload: cr.payload, message: cr.err?.message, response: cr.err?.response?.data }));
+          }
+        }
+
+        if (successfulCreates.length > 0) {
+          setAttendanceRecords((prev) => {
+            const map = new Map(prev.map((rec) => [rec.id, rec]));
+            for (const single of successfulCreates) {
+              if (single && single.id) map.set(single.id, single);
+            }
+            return Array.from(map.values());
+          });
+          results.push(...successfulCreates);
         }
       }
 
@@ -341,7 +443,7 @@ export const AttendanceProvider = ({ children }) => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [attendanceRecords]);
 
   const updateAttendance = useCallback(async (id, updatedData) => {
     try {
@@ -502,7 +604,7 @@ export const AttendanceProvider = ({ children }) => {
         const concurrency = 6;
         const runBatch = async (batch) => Promise.all(batch.map(async (s) => {
           try {
-            const payload = { studentId: s.id, classId, date: dateKey, isAbsent: false };
+            const payload = { studentId: s.id, classId, date: dateKey, isAbsent: false, isExcused: false };
             const r = await axios.post("/Attendance", payload);
             const returned = r?.data;
             if (returned) {
@@ -529,7 +631,7 @@ export const AttendanceProvider = ({ children }) => {
         // emit event
         try {
           window.dispatchEvent(new CustomEvent("attendance:initialized", { detail: { classId, date: dateKey, createdCount: created.length } }));
-        } catch (e) {
+        } catch {
           // ignore
         }
 

@@ -143,7 +143,7 @@ function Behavior() {
                     </SelectTrigger>
                     <SelectContent>
                       {Array.isArray(classes) && classes.map((c) => (
-                        <SelectItem key={c.id} value={c.id?.toString()}>{c.className}</SelectItem>
+                        <SelectItem key={c.id} value={c.id?.toString()}>{`${c.className}${c.academicTerm ? ` · ${c.academicTerm}` : ''}`}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
