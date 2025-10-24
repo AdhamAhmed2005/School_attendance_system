@@ -9,6 +9,7 @@ import { BehaviorProvider } from "./contexts/BehaviorContext";
 import { ClassProvider } from "./contexts/ClassContext";
 import { StudentProvider } from "./contexts/StudentContext";
 import { ReportsProvider } from "./contexts/ReportsContext";
+import { AuthProvider } from "./contexts/AuthContext";
 import ErrorBoundary from "./components/ErrorBoundary";
 
 // If VITE_API_BASE_URL is provided, use it. Otherwise in dev use a relative '/api' so
@@ -37,19 +38,21 @@ if (import.meta.env.DEV) {
 }
 
 createRoot(document.getElementById("root")).render(
-  <ReportsProvider>
-    <StudentProvider>
-      <ClassProvider>
-        <BehaviorProvider>
-          <AttendanceProvider>
-            <ErrorBoundary>
-              <RouterProvider router={router}>
-                <App />
-              </RouterProvider>
-            </ErrorBoundary>
-          </AttendanceProvider>
-        </BehaviorProvider>
-      </ClassProvider>
-    </StudentProvider>
-  </ReportsProvider>
+  <AuthProvider>
+    <ReportsProvider>
+      <StudentProvider>
+        <ClassProvider>
+          <BehaviorProvider>
+            <AttendanceProvider>
+              <ErrorBoundary>
+                <RouterProvider router={router}>
+                  <App />
+                </RouterProvider>
+              </ErrorBoundary>
+            </AttendanceProvider>
+          </BehaviorProvider>
+        </ClassProvider>
+      </StudentProvider>
+    </ReportsProvider>
+  </AuthProvider>
 );

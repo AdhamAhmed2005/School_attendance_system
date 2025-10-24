@@ -496,30 +496,32 @@ function Controls() {
             <form onSubmit={handleAddClass} className="space-y-6 mt-4">
               {/* Academic Term */}
               <div className="flex flex-col gap-3">
-                <Label className="text-right">الفصل الدراسي</Label>
+                <Label className="text-right">الفصل</Label>
                 <Select onValueChange={(value) => setFormData({ ...formData, academicTerm: value })}>
                   <SelectTrigger className="w-full justify-end text-right">
-                    <SelectValue placeholder="اختر الفصل الدراسي" />
+                    <SelectValue placeholder="اختر الفصل" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="الفصل الدراسي الأول">الفصل الدراسي الأول</SelectItem>
-                    <SelectItem value="الفصل الدراسي الثاني">الفصل الدراسي الثاني</SelectItem>
-                    <SelectItem value="الفصل الدراسي الثالث">الفصل الدراسي الثالث</SelectItem>
-                    <SelectItem value="الفصل الدراسي الرابع">الفصل الدراسي الرابع</SelectItem>
+                    <SelectItem value="الفصل الأول">الفصل الأول</SelectItem>
+                    <SelectItem value="الفصل الثاني">الفصل الثاني</SelectItem>
+                    <SelectItem value="الفصل الثالث">الفصل الثالث</SelectItem>
+                    <SelectItem value="الفصل الرابع">الفصل الرابع</SelectItem>
+                    <SelectItem value="الفصل الخامس">الفصل الخامس</SelectItem>
+                    <SelectItem value="الفصل السادس">الفصل السادس</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               {/* Class Name */}
               <div className="flex flex-col gap-3">
                 <Label htmlFor="className" className="text-right">
-                  اسم الفصل
+                  الصف
                 </Label>
                 <Input
                   id="className"
                   name="className"
                   value={formData.className}
                   onChange={handleChange}
-                  placeholder="أدخل اسم الفصل"
+                  placeholder="أدخل الصف"
                 />
               </div>
               {/* Student Count */}
@@ -665,16 +667,16 @@ function Controls() {
             <div className="sm:mt-6 flex flex-col gap-6 text-right">
               <div className="flex flex-col gap-2">
                 <p>
-                  <b>اسم الفصل:</b> {selectedClass.className}
+                  <b>الصف:</b> {selectedClass.className}
                 </p>
                 <p>
                   <b>مشرف الفصل:</b> {selectedClass.director}
                 </p>
                 <p>
-                  <b>الفصل الدراسي:</b> {selectedClass.academicTerm}
+                  <b>الفصل:</b> {selectedClass.academicTerm}
                 </p>
                 <p>
-                  <b>عدد الطلاب:</b> {selectedClass.studentCount}
+                  <b>عدد الطلاب:</b> {Array.isArray(students) ? students.length : (selectedClass.studentCount ?? 0)}
                 </p>
                 <p>
                   <b>تاريخ اليوم:</b> {selectedDate.toLocaleDateString("ar-EG")}
@@ -764,8 +766,12 @@ function Controls() {
                   <SelectValue placeholder="اختر الفصل الدراسي" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="الفصل الدراسي الأول">الفصل الدراسي الأول</SelectItem>
-                  <SelectItem value="الفصل الدراسي الثاني">الفصل الدراسي الثاني</SelectItem>
+                  <SelectItem value="الفصل الأول">الفصل الأول</SelectItem>
+                  <SelectItem value="الفصل الثاني">الفصل الثاني</SelectItem>
+                  <SelectItem value="الفصل الثالث">الفصل الثالث</SelectItem>
+                  <SelectItem value="الفصل الرابع">الفصل الرابع</SelectItem>
+                  <SelectItem value="الفصل الخامس">الفصل الخامس</SelectItem>
+                  <SelectItem value="الفصل السادس">الفصل السادس</SelectItem>
                 </SelectContent>
               </Select>
             </div>

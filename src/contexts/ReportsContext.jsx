@@ -17,8 +17,15 @@ export const ReportsProvider = ({ children }) => {
       setReports(response.data);
       setError(null);
     } catch (err) {
-      console.error("Error fetching reports:", err);
-      setError(err.message || "Failed to fetch reports");
+      // Treat 404 as 'no reports' (not an application error) so the UI can continue
+      if (err && err.response && err.response.status === 404) {
+        console.info('Reports endpoint returned 404 (no reports) — treating as empty list');
+        setReports([]);
+        setError(null);
+      } else {
+        console.error("Error fetching reports:", err);
+        setError(err.message || "Failed to fetch reports");
+      }
     } finally {
       setLoading(false);
     }

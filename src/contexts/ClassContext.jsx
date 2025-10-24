@@ -17,10 +17,21 @@ export const ClassProvider = ({ children }) => {
       // Normalize response to an array (some APIs return a single object)
       const data = response?.data;
       const normalized = Array.isArray(data) ? data : (data && typeof data === 'object' ? [data] : []);
+      // Normalize academicTerm values for consistency (client-side hygiene)
+      const normalizeAcademicTerm = (t) => {
+        if (!t && t !== 0) return "";
+        let s = String(t).trim();
+        // remove extra whitespace
+        s = s.replace(/\s+/g, " ");
+        // normalize variants like 'الفصل الدراسي الأول' -> 'الفصل الأول'
+        s = s.replace(/الفصل\s*الدراس[ىي]*/giu, "الفصل");
+        return s.trim();
+      };
+      const normalizedMapped = normalized.map((c) => ({ ...c, academicTerm: normalizeAcademicTerm(c?.academicTerm) }));
       if (!Array.isArray(data) && data && typeof data === 'object') {
         console.warn('ClassContext.fetchClasses: expected array, got object — wrapping in array', data);
       }
-      setClasses(normalized);
+      setClasses(normalizedMapped);
       setError(null);
       return normalized;
     } catch (err) {
@@ -36,7 +47,13 @@ export const ClassProvider = ({ children }) => {
     try {
       setLoading(true);
       const response = await axios.get(`/Class/${id}`);
-      return response.data;
+      const data = response.data;
+      if (data && typeof data === 'object') {
+        const s = (data.academicTerm && String(data.academicTerm).trim()) || "";
+        const academicTerm = s.replace(/\s+/g, " ").replace(/الفصل\s*الدراس[ىي]*/giu, "الفصل").trim();
+        return { ...data, academicTerm };
+      }
+      return data;
     } catch (err) {
       console.error("Error fetching class by ID:", err);
       throw err;
@@ -49,7 +66,10 @@ export const ClassProvider = ({ children }) => {
     async (classData) => {
       try {
         setLoading(true);
-        const response = await axios.post("/Class", classData);
+        // Normalize academicTerm before sending
+        const payload = { ...classData };
+        if (payload.academicTerm) payload.academicTerm = String(payload.academicTerm).trim().replace(/\s+/g, " ").replace(/الفصل\s*الدراس[ىي]*/giu, "الفصل").trim();
+        const response = await axios.post("/Class", payload);
         if (!response.data || !response.data.id) {
           // If API returned an unexpected shape, refresh the classes list and return the last one
           const refreshed = await fetchClasses();
@@ -74,11 +94,16 @@ export const ClassProvider = ({ children }) => {
     async (id, updatedData) => {
       try {
         setLoading(true);
-        const response = await axios.put(`/Class/${id}`, { id, ...updatedData });
+        // Normalize academicTerm before sending
+        const payload = { id, ...updatedData };
+        if (payload.academicTerm) payload.academicTerm = String(payload.academicTerm).trim().replace(/\s+/g, " ").replace(/الفصل\s*الدراس[ىي]*/giu, "الفصل").trim();
+        const response = await axios.put(`/Class/${id}`, payload);
         if (!response.data || !response.data.id) {
           await fetchClasses();
         } else {
-          setClasses((prev) => prev.map((c) => (c.id === id ? response.data : c)));
+          // normalize returned value as well
+          const returned = { ...response.data, academicTerm: String(response.data.academicTerm || "").trim().replace(/\s+/g, " ").replace(/الفصل\s*الدراس[ىي]*/giu, "الفصل").trim() };
+          setClasses((prev) => prev.map((c) => (c.id === id ? returned : c)));
         }
       } catch (err) {
         console.error("Error updating class:", err);
@@ -138,6 +163,29 @@ export const ClassProvider = ({ children }) => {
   useEffect(() => {
     fetchClasses();
   }, [fetchClasses]);
+
+  // Reconcile any selectedClass persisted in localStorage with freshly fetched classes.
+  // If the server-returned (and normalized) class exists, replace selectedClass so the UI
+  // immediately reflects normalized academicTerm. If not found, clear selectedClass.
+  useEffect(() => {
+    if (!classes || classes.length === 0) return;
+    if (!selectedClass) return;
+    try {
+      const matched = classes.find((c) => c.id === selectedClass.id);
+      if (matched) {
+        // Replace selectedClass if the server version differs (this will update localStorage via the other effect)
+        const needReplace = JSON.stringify(matched) !== JSON.stringify(selectedClass);
+        if (needReplace) setSelectedClass(matched);
+      } else {
+        // class no longer exists or changed id; clear saved selection so UI falls back to fresh pick
+        setSelectedClass(null);
+      }
+    } catch (err) {
+      // ignore reconciliation errors
+      // eslint-disable-next-line no-console
+      console.error("Error reconciling selectedClass with server classes:", err);
+    }
+  }, [classes]);
 
   return (
     <ClassContext.Provider

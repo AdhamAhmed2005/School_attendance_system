@@ -24,6 +24,8 @@ import {
   Cell,
   CartesianGrid,
 } from 'recharts';
+import { PieChart, Pie } from 'recharts';
+import axios from 'axios';
 import { useClass } from "@/contexts/ClassContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
@@ -43,8 +45,16 @@ function Reports() {
   const [attendanceStats, setAttendanceStats] = useState(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [monthlySeries, setMonthlySeries] = useState(null);
+  const [stagePieData, setStagePieData] = useState(null);
+  const [stagePieLoading, setStagePieLoading] = useState(false);
+  const [selectedStage, setSelectedStage] = useState(null);
+  const [schoolPieData, setSchoolPieData] = useState(null);
+  const [schoolPieLoading, setSchoolPieLoading] = useState(false);
+  const [classPieData, setClassPieData] = useState(null);
+  const [classPieLoading, setClassPieLoading] = useState(false);
   const [topStudents, setTopStudents] = useState(null);
   const [behaviorStats, setBehaviorStats] = useState(null);
+  const [isSmallScreen, setIsSmallScreen] = useState(false);
 
   // Render XAxis tick with wrapping (split label by spaces and render up to 3 lines)
   const renderWrappedTick = (props) => {
@@ -95,6 +105,10 @@ function Reports() {
 
   // Palette - one color per category (will cycle if fewer colors than categories)
   const categoryColors = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#10b981', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#db2777', '#64748b', '#0ea5a4', '#7c3aed', '#a3e635', '#94a3b8'];
+  // Dedicated palettes for the three pies to make them visually distinct
+  const stagePalette = ['#ef4444', '#f97316']; // stage pie (red/orange) — absent/present
+  const schoolPalette = ['#3b82f6', '#10b981']; // school pie (blue/green)
+  const classPalette = ['#8b5cf6', '#f59e0b'];  // single-class pie (purple/yellow)
   
   const [sortOrder] = useState("desc");
   const [page, setPage] = useState(1);
@@ -112,6 +126,20 @@ function Reports() {
   useEffect(() => {
     fetchReports();
   }, [fetchReports]);
+
+  // Detect small screens to adjust chart labels / radii
+  useEffect(() => {
+    const check = () => {
+      try {
+        setIsSmallScreen(typeof window !== 'undefined' && window.innerWidth <= 480);
+      } catch {
+        setIsSmallScreen(false);
+      }
+    };
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
 
   // Load students for the selected class only
   useEffect(() => {
@@ -376,6 +404,133 @@ function Reports() {
     compute();
   }, [classes, statsMonth, fetchAttendance, fetchStudents, classStudents, selectedClassId, fetchClassMonthlyStats, fetchNoAbsenceStudents, fetchBehaviorStats]);
 
+  // Build pie data for a single selected stage (group = className) - absent vs present
+  useEffect(() => {
+    const loadStagePie = async () => {
+      if (!statsMonth) {
+        setStagePieData(null);
+        return;
+      }
+      if (!Array.isArray(classes) || classes.length === 0) {
+        setStagePieData(null);
+        return;
+      }
+      // ensure we have a selectedStage; default to first unique className if not set
+      const uniqueStages = Array.from(new Set(classes.map(c => (c.className || '').trim()).filter(Boolean)));
+      if (!selectedStage && uniqueStages.length > 0) {
+        setSelectedStage(uniqueStages[0]);
+        // we'll run again due to state change
+        return;
+      }
+      if (!selectedStage) {
+        setStagePieData(null);
+        return;
+      }
+
+      setStagePieLoading(true);
+      try {
+        const [year, mon] = (statsMonth || '').split('-').map((s) => Number(s));
+        // collect ids for the chosen stage (className)
+        const ids = classes.filter(c => (c.className || '').trim() === selectedStage).map(c => c.id);
+        if (ids.length === 0) {
+          setStagePieData(null);
+          return;
+        }
+        const qs = ids.map(id => `classIds=${encodeURIComponent(id)}`).join('&');
+        const url = `/Attendance/attendance-stats/classes?${qs}&year=${encodeURIComponent(year)}&month=${encodeURIComponent(mon)}`;
+        const resp = await axios.get(url);
+        const data = resp?.data ?? {};
+        const absent = Number(data.absentCount ?? data.absents ?? data.absent ?? 0) || 0;
+        const present = Number(data.presentCount ?? data.present ?? 0) || 0;
+        const total = absent + present;
+        const percentAbsent = total > 0 ? (absent / total) * 100 : 0;
+        const percentPresent = 100 - percentAbsent;
+        const pie = [
+          { name: 'غائب', value: Number(percentAbsent.toFixed(2)), count: absent },
+          { name: 'حاضر', value: Number(percentPresent.toFixed(2)), count: present }
+        ];
+        setStagePieData(pie);
+      } catch (err) {
+        console.error('Failed to load stage pie data', err);
+        setStagePieData(null);
+      } finally {
+        setStagePieLoading(false);
+      }
+    };
+    loadStagePie();
+  }, [classes, statsMonth, selectedStage]);
+
+  // School-wide absence percentage pie (غائب vs حاضر)
+  useEffect(() => {
+    const loadSchoolPie = async () => {
+      if (!statsMonth) {
+        setSchoolPieData(null);
+        return;
+      }
+      setSchoolPieLoading(true);
+      try {
+        const [year, mon] = (statsMonth || '').split('-').map((s) => Number(s));
+        // Use relative path so axios.defaults.baseURL is respected (avoids /api/api double)
+        const url = `/Attendance/absence-percentage/school?year=${encodeURIComponent(year)}&month=${encodeURIComponent(mon)}`;
+        const resp = await axios.get(url);
+        const raw = Number(resp?.data?.absencePercentage ?? resp?.data?.absencePercent ?? resp?.data?.percent ?? 0) || 0;
+        // Accept either 0..100 or 0..1 and normalize to percentage 0..100
+        const percentAbsent = raw > 1 ? raw : raw * 100;
+        const percentPresent = Math.max(0, 100 - percentAbsent);
+        const pie = [
+          { name: 'غائب', value: Number(percentAbsent.toFixed(2)), count: undefined },
+          { name: 'حاضر', value: Number(percentPresent.toFixed(2)), count: undefined }
+        ];
+        setSchoolPieData(pie);
+      } catch (err) {
+        console.error('Failed to load school absence percentage', err);
+        setSchoolPieData(null);
+      } finally {
+        setSchoolPieLoading(false);
+      }
+    };
+    loadSchoolPie();
+  }, [statsMonth]);
+
+  // Class-level absence pie for a single selected class (uses same endpoint as stage but with single id)
+  useEffect(() => {
+    const loadClassPie = async () => {
+      if (!statsMonth) {
+        setClassPieData(null);
+        return;
+      }
+      if (!selectedClassId) {
+        setClassPieData(null);
+        return;
+      }
+      setClassPieLoading(true);
+      try {
+        const [year, mon] = (statsMonth || '').split('-').map((s) => Number(s));
+        const id = Number(selectedClassId);
+        const url = `/Attendance/attendance-stats/classes?classIds=${encodeURIComponent(id)}&year=${encodeURIComponent(year)}&month=${encodeURIComponent(mon)}`;
+        const resp = await axios.get(url);
+        const data = resp?.data ?? {};
+        // data may be { absentCount, presentCount }
+        const absent = Number(data.absentCount ?? data.absents ?? data.absent ?? 0) || 0;
+        const present = Number(data.presentCount ?? data.present ?? 0) || 0;
+        const total = absent + present;
+        const percentAbsent = total > 0 ? (absent / total) * 100 : 0;
+        const percentPresent = 100 - percentAbsent;
+        const pie = [
+          { name: 'غائب', value: Number(percentAbsent.toFixed(2)), count: absent },
+          { name: 'حاضر', value: Number(percentPresent.toFixed(2)), count: present }
+        ];
+        setClassPieData(pie);
+      } catch (err) {
+        console.error('Failed to load class absence pie', err);
+        setClassPieData(null);
+      } finally {
+        setClassPieLoading(false);
+      }
+    };
+    loadClassPie();
+  }, [selectedClassId, statsMonth]);
+
   const filtered = useMemo(() => {
     const list = Array.isArray(reports) ? reports.slice() : [];
     return list.sort((a, b) => {
@@ -479,92 +634,180 @@ function Reports() {
             </div>
           </div>
 
-          {/* Unified charts grid: monthly series, top students, behavior */}
-          <div className="border rounded p-4 mb-4 bg-white">
-            <div className="mb-3 font-semibold text-center">المخططات</div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Monthly series column */}
-              <div className="flex flex-col items-center">
-                <div className="mb-2 font-medium">إحصائيات غياب - 12 شهر</div>
-                <div style={{ width: 920, maxWidth: '100%', height: 260 }}>
-                  <ResponsiveContainer>
-                    <LineChart data={monthlySeries ?? Array.from({ length: 12 }).map(() => ({ label: '', count3: 0, count5: 0 }))} margin={{ top: 10, right: 20, left: 0, bottom: 20 }}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="label" />
-                      <YAxis allowDecimals={false} />
-                      <Tooltip />
-                      <Legend />
-                      <Line type="monotone" dataKey="count3" name="غياب ≥3" stroke="#EF4444" strokeWidth={2} activeDot={{ r: 6 }} />
-                      <Line type="monotone" dataKey="count5" name="غياب ≥5" stroke="#F97316" strokeWidth={2} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Top students column */}
-              <div className="flex flex-col items-center">
-                <div className="mb-2 font-medium">أعلى 10 طالبات غيابًا (الشهر المحدد)</div>
-                <div style={{ width: 920, maxWidth: '100%', height: 260 }}>
-                  <ResponsiveContainer>
-                    <BarChart data={topStudents ?? Array.from({ length: 6 }).map(() => ({ name: `-`, absentDays: 0 }))} layout="vertical" margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis type="number" allowDecimals={false} />
-                      <YAxis type="category" dataKey="name" width={140} />
-                      <Tooltip />
-                      <Bar dataKey="absentDays" name="أيام غياب" fill="#EF4444" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Behavior column */}
-              <div className="flex flex-col items-center">
-                <div className="mb-2 font-medium">الحوادث بحسب النوع</div>
-                <div style={{ width: 920, maxWidth: '100%', height: 260, overflowX: 'auto' }}>
-                  {(() => {
-                    const byCat = behaviorStats?.byCategory ?? {};
-                    const entries = behaviorCategories.map((label, idx) => ({
-                      category: label.replace(/_/g, ' '),
-                      rawLabel: label,
-                      count: Number(byCat[idx] ?? byCat[label] ?? 0),
-                      color: categoryColors[idx % categoryColors.length]
-                    }));
-                    const minWidth = Math.max(700, entries.length * 140);
-                    return (
-                      <div style={{ minWidth }}>
-                        <ResponsiveContainer width="100%" height={260}>
-                          <BarChart data={entries} margin={{ top: 10, right: 20, left: 10, bottom: 80 }}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="category" interval={0} tick={renderWrappedTick} />
-                            <YAxis allowDecimals={false} />
-                            <Tooltip />
-                            <Legend />
-                            <Bar dataKey="count" name="عدد الحوادث" label={{ position: 'top' }}>
-                              {entries.map((e, i) => (
-                                <Cell key={`cell-${i}`} fill={e.color} />
-                              ))}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    );
-                  })()}
-                </div>
-                {/* behavior timeline under the chart */}
-                <div className="mt-2 w-full max-h-36 overflow-auto text-sm">
-                  {Array.isArray(behaviorStats?.timeline) && behaviorStats.timeline.length > 0 ? (
-                    <ul>
-                      {behaviorStats.timeline.map((t, idx) => (
-                        <li key={idx} className="flex justify-between"><span>{t.date}</span><span>{t.count}</span></li>
+            {/* Absence by grade / stage pie chart (single stage) */}
+            <div className="border rounded p-4 mb-4 bg-white">
+              <div className="mb-3 font-semibold text-center">نسبة الغياب حسب المرحله (الشهر المحدد)</div>
+              <div className="flex flex-col items-center gap-3">
+                <div className="w-full md:w-1/3 text-right">
+                  <Label className="text-right m-1">المرحله</Label>
+                  <Select value={selectedStage ?? "__none"} onValueChange={(v) => setSelectedStage(v === "__none" ? null : v)}>
+                    <SelectTrigger className="w-full"><SelectValue placeholder="اختر المرحله" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none">اختر صفًا</SelectItem>
+                      {Array.from(new Set((classes || []).map(c => (c.className || '').trim()).filter(Boolean))).map((st) => (
+                        <SelectItem key={st} value={st}>{st}</SelectItem>
                       ))}
-                    </ul>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="flex items-center justify-center w-full">
+                  {stagePieLoading ? (
+                    <div className="text-sm text-gray-500">جارٍ تحميل بيانات الصف...</div>
+                  ) : Array.isArray(stagePieData) && stagePieData.length > 0 ? (
+                    <>
+                    <div style={{ width: 520, maxWidth: '100%', height: 300, minWidth: 0 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={stagePieData}
+                            dataKey="value"
+                            nameKey="name"
+                            cx="50%"
+                            cy="50%"
+                            outerRadius={isSmallScreen ? 60 : 100}
+                            label={!isSmallScreen ? ({ name, value }) => `${name} ${value}%` : false}
+                          >
+                            {stagePieData.map((entry, idx) => (
+                              <Cell key={`cell-${idx}`} fill={stagePalette[idx % stagePalette.length]} />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(val, name, props) => {
+                            const p = props?.payload || {};
+                            return [`${val}%`, `${p.name} (${p.count ?? ''})`];
+                          }} />
+                          {!isSmallScreen && (
+                            <Legend layout="vertical" verticalAlign="middle" align="right" wrapperStyle={{ right: 0, top: '50%', transform: 'translateY(-50%)' }} />
+                          )}
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    {isSmallScreen && Array.isArray(stagePieData) && (
+                      <div className="mt-2 w-full text-sm">
+                        <ul className="flex flex-row gap-3 justify-center flex-wrap">
+                          {stagePieData.map((d, i) => (
+                            <li key={d.name} className="flex items-center gap-2">
+                              <span style={{ width: 12, height: 12, background: stagePalette[i % stagePalette.length], display: 'inline-block' }} />
+                              <span>{d.name} — {d.value}%{d.count != null ? ` (${d.count})` : ''}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    </>
                   ) : (
-                    <div className="text-gray-500">لا توجد بيانات زمنية</div>
+                    <div className="text-sm text-gray-500">لا توجد بيانات لعرضها</div>
+                  )}
+                </div>
+              </div>
+
+              {/* School-wide absence pie */}
+              <div className="border rounded p-4 mb-4 bg-white">
+                <div className="mb-3 font-semibold text-center">نسبة الغياب - المدرسة (الشهر المحدد)</div>
+                <div className="flex items-center justify-center">
+                  {schoolPieLoading ? (
+                    <div className="text-sm text-gray-500">جارٍ تحميل بيانات المدرسة...</div>
+                  ) : Array.isArray(schoolPieData) && schoolPieData.length > 0 ? (
+                    <>
+                    <div style={{ width: 440, maxWidth: '100%', height: 260, minWidth: 0 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={schoolPieData}
+                            dataKey="value"
+                            nameKey="name"
+                            cx="50%"
+                            cy="50%"
+                            outerRadius={isSmallScreen ? 60 : 80}
+                            label={!isSmallScreen ? ({ name, value }) => `${name} ${value}%` : false}
+                          >
+                            {schoolPieData.map((entry, idx) => (
+                              <Cell key={`cell-school-${idx}`} fill={schoolPalette[idx % schoolPalette.length]} />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(val) => `${val}%`} />
+                          {!isSmallScreen && (
+                            <Legend layout="vertical" verticalAlign="middle" align="right" wrapperStyle={{ right: 0, top: '50%', transform: 'translateY(-50%)' }} />
+                          )}
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    {isSmallScreen && Array.isArray(schoolPieData) && (
+                      <div className="mt-2 w-full text-sm">
+                        <ul className="flex flex-row gap-3 justify-center flex-wrap">
+                          {schoolPieData.map((d, i) => (
+                            <li key={d.name} className="flex items-center gap-2">
+                              <span style={{ width: 12, height: 12, background: schoolPalette[i % schoolPalette.length], display: 'inline-block' }} />
+                              <span>{d.name} — {d.value}%{d.count != null ? ` (${d.count})` : ''}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    </>
+                  ) : (
+                    <div className="text-sm text-gray-500">لا توجد بيانات لعرضها</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Class-level absence pie (single class) */}
+              <div className="border rounded p-4 mb-4 bg-white">
+                <div className="mb-3 font-semibold text-center">نسبة الغياب - الفصل المحدد (الشهر)</div>
+                <div className="flex items-center justify-center">
+                  {!selectedClassId ? (
+                    <div className="text-sm text-gray-500">اختر فصلًا من الأعلى لعرض إحصائيات هذا الفصل</div>
+                  ) : classPieLoading ? (
+                    <div className="text-sm text-gray-500">جارٍ تحميل بيانات الفصل...</div>
+                  ) : Array.isArray(classPieData) && classPieData.length > 0 ? (
+                    <>
+                    <div style={{ width: 440, maxWidth: '100%', height: 260, minWidth: 0 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={classPieData}
+                            dataKey="value"
+                            nameKey="name"
+                            cx="50%"
+                            cy="50%"
+                            outerRadius={isSmallScreen ? 60 : 80}
+                            label={!isSmallScreen ? ({ name, value }) => `${name} ${value}%` : false}
+                          >
+                            {classPieData.map((entry, idx) => (
+                              <Cell key={`cell-class-${idx}`} fill={classPalette[idx % classPalette.length]} />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(val, name, props) => {
+                            const p = props?.payload || {};
+                            return [`${val}%`, `${p.name} (${p.count ?? ''})`];
+                          }} />
+                          {!isSmallScreen && (
+                            <Legend layout="vertical" verticalAlign="middle" align="right" wrapperStyle={{ right: 0, top: '50%', transform: 'translateY(-50%)' }} />
+                          )}
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    {isSmallScreen && Array.isArray(classPieData) && (
+                      <div className="mt-2 w-full text-sm">
+                        <ul className="flex flex-row gap-3 justify-center flex-wrap">
+                          {classPieData.map((d, i) => (
+                            <li key={d.name} className="flex items-center gap-2">
+                              <span style={{ width: 12, height: 12, background: classPalette[i % classPalette.length], display: 'inline-block' }} />
+                              <span>{d.name} — {d.value}%{d.count != null ? ` (${d.count})` : ''}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    </>
+                  ) : (
+                    <div className="text-sm text-gray-500">لا توجد بيانات لعرضها</div>
                   )}
                 </div>
               </div>
             </div>
-          </div>
+
+          {/* Unified charts removed per user request */}
 
           {/* Absence count lookup */}
           <div className="border rounded p-4 mb-4 bg-white">

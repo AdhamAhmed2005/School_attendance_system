@@ -1,6 +1,10 @@
 import { School } from "lucide-react";
+import { Link } from "react-router-dom";
+import { useAuth } from "../contexts/AuthContext";
 
 function Navbar() {
+  const { user, isAuthenticated, logout } = useAuth();
+
   return (
     <header className="bg-white shadow-md border-b-2 border-blue-500">
       <div className="container mx-auto p-4">
@@ -14,9 +18,15 @@ function Navbar() {
               <p className="text-[14px] sm:text-sm text-gray-600">المدرسة الابتدائية السادسة عشر بالخبر</p>
             </div>
           </div>
-          <div className="text-right">
-            <p className="text-sm font-semibold text-gray-700">مديرة المدرسة: عفاف الحويل</p>
-            <p className="text-sm text-gray-600">وكيلة المدرسة: نوف الخزيم</p>
+          <div className="text-right flex items-center gap-4">
+            <div className="text-right">
+              <p className="text-sm font-semibold text-gray-700">مديرة المدرسة: عفاف الحويل</p>
+              <p className="text-sm text-gray-600">وكيلة المدرسة: نوف الخزيم</p>
+            </div>
+            <div>
+              {/* Login UI intentionally hidden for deployments that shouldn't expose login.
+                  Auth code remains in the codebase, but we don't display login/logout controls here. */}
+            </div>
           </div>
         </div>
       </div>
